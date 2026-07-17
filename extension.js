@@ -21,6 +21,7 @@ function setCurrentProject(uri) {
 	const folder = vscode.workspace.getWorkspaceFolder(uri);
 	if (folder) {
 		currentProjectFolder = folder;
+		updateStatusBar();
 	}
 	return folder;
 }
@@ -45,8 +46,57 @@ async function resolveProjectFolder() {
 }
 
 // ============================================================
+// 상태 표시줄: 현재 프로젝트 표시 + 클릭 시 검색/파일 열기 메뉴
+// ============================================================
+
+let statusItem;
+
+function updateStatusBar() {
+	if (!statusItem) {
+		return;
+	}
+	if (currentProjectFolder) {
+		statusItem.text = `$(root-folder) ${currentProjectFolder.name}`;
+		statusItem.tooltip = '현재 프로젝트 — 클릭해서 검색/파일 열기';
+		statusItem.show();
+	} else {
+		statusItem.hide();
+	}
+}
+
+async function switchProject() {
+	const folders = vscode.workspace.workspaceFolders || [];
+	const picked = await vscode.window.showQuickPick(
+		folders.map((f) => ({ label: f.name, description: f.uri.fsPath, folder: f })),
+		{ placeHolder: '현재 프로젝트로 지정할 폴더 선택' }
+	);
+	if (picked) {
+		currentProjectFolder = picked.folder;
+		updateStatusBar();
+	}
+}
+
+async function projectActions() {
+	const folder = await resolveProjectFolder();
+	if (!folder) {
+		return;
+	}
+	const picked = await vscode.window.showQuickPick(
+		[
+			{ label: `$(search) ${folder.name}에서 텍스트 검색`, action: findInProject },
+			{ label: `$(go-to-file) ${folder.name}에서 파일 열기`, action: openFileInProject },
+			{ label: '$(folder-opened) 다른 프로젝트로 전환...', action: switchProject }
+		],
+		{ placeHolder: `현재 프로젝트: ${folder.name}` }
+	);
+	if (picked) {
+		await picked.action();
+	}
+}
+
+// ============================================================
 // 기능 1: 터미널-탐색기 동기화
-// 터미널 포커스가 바뀌면 그 터미널의 작업 디렉토리를 탐색기에서 reveal.
+// 터미널 포커스가 바뀌면 그 터미널의 작업 디렉토리를 탐색기에서 reveal + 펼침.
 // ============================================================
 
 // 직전에 reveal한 경로 — 같은 폴더를 반복해서 reveal하지 않기 위한 기억값
@@ -86,7 +136,9 @@ async function revealCwd(terminal) {
 	lastRevealedPath = cwd.toString();
 	try {
 		await vscode.commands.executeCommand('revealInExplorer', cwd);
-		// reveal이 탐색기로 포커스를 가져가는 경우가 있어 터미널로 되돌림
+		// reveal은 폴더를 선택만 하고 펼치지는 않으므로, 포커스된 항목을 펼침
+		await vscode.commands.executeCommand('list.expand');
+		// reveal이 탐색기로 포커스를 가져가므로 터미널로 되돌림
 		if (vscode.window.activeTerminal === terminal) {
 			terminal.show(false);
 		}
@@ -178,6 +230,10 @@ async function openFileInProject() {
 // ============================================================
 
 function activate(context) {
+	statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+	statusItem.command = 'claudeCodeCompanion.projectActions';
+	context.subscriptions.push(statusItem);
+
 	context.subscriptions.push(
 		vscode.window.onDidChangeActiveTerminal(handleTerminalFocus),
 
@@ -210,7 +266,8 @@ function activate(context) {
 		}),
 
 		vscode.commands.registerCommand('claudeCodeCompanion.findInProject', findInProject),
-		vscode.commands.registerCommand('claudeCodeCompanion.openFileInProject', openFileInProject)
+		vscode.commands.registerCommand('claudeCodeCompanion.openFileInProject', openFileInProject),
+		vscode.commands.registerCommand('claudeCodeCompanion.projectActions', projectActions)
 	);
 
 	// 확장 로드 시점의 활성 터미널/에디터를 한 번 반영
@@ -218,6 +275,7 @@ function activate(context) {
 	if (vscode.window.activeTextEditor) {
 		setCurrentProject(vscode.window.activeTextEditor.document.uri);
 	}
+	updateStatusBar();
 }
 
 function deactivate() {}

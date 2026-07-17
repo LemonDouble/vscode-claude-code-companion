@@ -2,7 +2,7 @@
 	"name": "vscode-claude-code-companion",
 	"displayName": "Claude Code Companion",
 	"description": "Claude Code 멀티 프로젝트 워크플로우를 위한 VS Code 도우미 확장",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"publisher": "lemondouble",
 	"license": "MIT",
 	"repository": {
@@ -27,23 +27,27 @@
 			},
 			{
 				"command": "claudeCodeCompanion.findInProject",
-				"title": "Claude Code Companion: 현재 프로젝트에서 텍스트 검색"
+				"title": "Claude Code Companion: 현재 프로젝트에서 텍스트 검색",
+				"icon": "$(filter)"
 			},
 			{
 				"command": "claudeCodeCompanion.openFileInProject",
 				"title": "Claude Code Companion: 현재 프로젝트에서 파일 열기"
-			}
-		],
-		"keybindings": [
-			{
-				"command": "claudeCodeCompanion.findInProject",
-				"key": "ctrl+alt+f"
 			},
 			{
-				"command": "claudeCodeCompanion.openFileInProject",
-				"key": "ctrl+alt+p"
+				"command": "claudeCodeCompanion.projectActions",
+				"title": "Claude Code Companion: 현재 프로젝트 메뉴"
 			}
 		],
+		"menus": {
+			"view/title": [
+				{
+					"command": "claudeCodeCompanion.findInProject",
+					"when": "view == workbench.view.search",
+					"group": "navigation"
+				}
+			]
+		},
 		"configuration": {
 			"title": "Claude Code Companion",
 			"properties": {
