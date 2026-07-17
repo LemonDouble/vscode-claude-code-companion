@@ -241,12 +241,50 @@ async function openFileInProject() {
 
 const EVENTS_DIR = path.join(os.homedir(), '.claude', 'companion-events');
 
-// 알림이 떠 있는 동안 같은 폴더의 중복 알림을 막기 위한 기억값
-const pendingNotifications = new Set();
+// 같은 알림의 단시간 중복 발화를 막기 위한 기억값 (key → 마지막 표시 시각)
+// 토스트가 떠 있는지 여부로 판단하면 안 된다 — 버튼이 있는 토스트는 사용자가
+// 닫기 전까지 사라지지 않아서, 방치된 토스트 하나가 후속 알림을 전부 막는다.
+const recentNotifications = new Map();
+const NOTIFICATION_DEDUPE_MS = 3000;
 
-function findTerminalForFolder(folder, cwdPath) {
+// 해당 폴더의 claude가 떠 있는 터미널을 찾는다.
+// 1순위: claude 프로세스의 조상 셸 pid == terminal.processId 인 터미널
+//        (같은 폴더에 터미널이 여러 개여도 claude가 도는 터미널을 특정)
+// 2순위: cwd가 정확히 일치하는 터미널, 3순위: 같은 폴더의 아무 터미널
+async function findTerminalForFolder(folder, cwdPath) {
+	const terminals = vscode.window.terminals;
+	const pidToTerminal = new Map();
+	await Promise.all(
+		terminals.map(async (t) => {
+			try {
+				const pid = await t.processId;
+				if (pid) {
+					pidToTerminal.set(pid, t);
+				}
+			} catch {
+				// 이미 닫힌 터미널
+			}
+		})
+	);
+	for (const proc of runningClaudeProcs()) {
+		const procFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(proc.cwd));
+		if (!procFolder || procFolder.uri.toString() !== folder.uri.toString()) {
+			continue;
+		}
+		let p = proc.pid;
+		for (let depth = 0; depth < 5; depth++) {
+			p = ppidOf(p);
+			if (!p || p <= 1) {
+				break;
+			}
+			const terminal = pidToTerminal.get(p);
+			if (terminal) {
+				return terminal;
+			}
+		}
+	}
 	let fallback;
-	for (const t of vscode.window.terminals) {
+	for (const t of terminals) {
 		const cwd = getTerminalCwd(t);
 		if (!cwd || cwd.scheme !== 'file') {
 			continue;
@@ -291,32 +329,32 @@ async function handleCompanionEvent(file) {
 	if (!message) {
 		return;
 	}
-	// 이미 그 프로젝트의 터미널을 보고 있으면 알림 생략
-	const active = vscode.window.activeTerminal;
-	if (vscode.window.state.focused && active) {
-		const activeCwd = getTerminalCwd(active);
-		const activeFolder = activeCwd && vscode.workspace.getWorkspaceFolder(activeCwd);
-		if (activeFolder && activeFolder.uri.toString() === folder.uri.toString()) {
-			return;
+	// 옵트인: 그 프로젝트의 터미널을 보고 있으면 알림 생략.
+	// activeTerminal은 터미널 패널이 닫혀 있어도 존재하므로 오탐이 있어 기본 꺼짐.
+	if (config().get('notifications.skipWhenViewing', false)) {
+		const active = vscode.window.activeTerminal;
+		if (vscode.window.state.focused && active) {
+			const activeCwd = getTerminalCwd(active);
+			const activeFolder = activeCwd && vscode.workspace.getWorkspaceFolder(activeCwd);
+			if (activeFolder && activeFolder.uri.toString() === folder.uri.toString()) {
+				return;
+			}
 		}
 	}
 	const key = `${kind}:${folder.uri.toString()}`;
-	if (pendingNotifications.has(key)) {
+	const now = Date.now();
+	if (now - (recentNotifications.get(key) || 0) < NOTIFICATION_DEDUPE_MS) {
 		return;
 	}
-	pendingNotifications.add(key);
-	try {
-		const picked = await vscode.window.showInformationMessage(message, '터미널로 이동');
-		if (picked === '터미널로 이동') {
-			const terminal = findTerminalForFolder(folder, event.cwd);
-			if (terminal) {
-				terminal.show();
-			} else {
-				await vscode.commands.executeCommand('revealInExplorer', uri);
-			}
+	recentNotifications.set(key, now);
+	const picked = await vscode.window.showInformationMessage(message, '터미널로 이동');
+	if (picked === '터미널로 이동') {
+		const terminal = await findTerminalForFolder(folder, event.cwd);
+		if (terminal) {
+			terminal.show();
+		} else {
+			await vscode.commands.executeCommand('revealInExplorer', uri);
 		}
-	} finally {
-		pendingNotifications.delete(key);
 	}
 }
 
@@ -419,14 +457,14 @@ function readSavedSessions() {
 	return sessions;
 }
 
-// argv[0]이 정확히 claude인 프로세스들의 cwd 목록 (/proc 스캔, Linux/WSL 전용)
-function runningClaudeCwds() {
-	const cwds = [];
+// argv[0]이 정확히 claude인 프로세스 목록 (/proc 스캔, Linux/WSL 전용)
+function runningClaudeProcs() {
+	const procs = [];
 	let pids;
 	try {
 		pids = fs.readdirSync('/proc').filter((n) => /^\d+$/.test(n));
 	} catch {
-		return cwds; // /proc 없는 플랫폼 — 실행 중 감지 생략
+		return procs; // /proc 없는 플랫폼 — 실행 중 감지 생략
 	}
 	for (const pid of pids) {
 		try {
@@ -434,19 +472,28 @@ function runningClaudeCwds() {
 			if (path.basename(argv0) !== 'claude') {
 				continue;
 			}
-			cwds.push(fs.readlinkSync(`/proc/${pid}/cwd`));
+			procs.push({ pid: Number(pid), cwd: fs.readlinkSync(`/proc/${pid}/cwd`) });
 		} catch {
 			// 이미 종료됐거나 권한 없음
 		}
 	}
-	return cwds;
+	return procs;
+}
+
+function ppidOf(pid) {
+	try {
+		const m = fs.readFileSync(`/proc/${pid}/status`, 'utf8').match(/^PPid:\s*(\d+)/m);
+		return m ? Number(m[1]) : 0;
+	} catch {
+		return 0;
+	}
 }
 
 // 이 창에서 복구 가능한 세션 목록: 폴더당 최신 1개, 살아있는 세션 제외.
 // files에는 해당 폴더의 레지스트리 파일 전부를 담는다 (복구/무시 시 일괄 정리용).
 function collectRestorableSessions() {
 	const aliveFolders = new Set();
-	for (const cwd of runningClaudeCwds()) {
+	for (const { cwd } of runningClaudeProcs()) {
 		const f = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(cwd));
 		if (f) {
 			aliveFolders.add(f.uri.toString());
