@@ -342,6 +342,36 @@ function startStopEventWatcher(context) {
 }
 
 // ============================================================
+// 기능 5: Add to Claude Path
+// 탐색기 우클릭 메뉴에서 선택한 파일/폴더의 절대 경로를 활성 터미널에
+// 개행 없이 타이핑한다 — Claude Code 입력창에 경로가 입력된 상태가 됨.
+// 활성 터미널로 보내므로 다른 프로젝트의 경로도 현재 채팅에 넣을 수 있다.
+// ============================================================
+
+function addToClaudePath(uri, uris) {
+	let targets = Array.isArray(uris) && uris.length > 0 ? uris : uri ? [uri] : [];
+	// 커맨드 팔레트에서 uri 없이 호출된 경우 활성 에디터 파일로 대체
+	if (targets.length === 0 && vscode.window.activeTextEditor) {
+		targets = [vscode.window.activeTextEditor.document.uri];
+	}
+	targets = targets.filter((u) => u && u.scheme === 'file');
+	if (targets.length === 0) {
+		vscode.window.showWarningMessage('경로를 보낼 파일/폴더가 없습니다.');
+		return;
+	}
+	const terminal = vscode.window.activeTerminal;
+	if (!terminal) {
+		vscode.window.showWarningMessage('활성 터미널이 없습니다. Claude가 떠 있는 터미널을 한 번 클릭한 뒤 다시 시도하세요.');
+		return;
+	}
+	const text = targets
+		.map((u) => (/\s/.test(u.fsPath) ? `"${u.fsPath}"` : u.fsPath))
+		.join(' ');
+	terminal.sendText(`${text} `, false);
+	terminal.show(false);
+}
+
+// ============================================================
 // 기능 4: Claude 세션 저장/복구
 // SessionStart/SessionEnd 훅이 ~/.claude/companion-sessions/ 에 활성
 // 세션을 기록한다 (설치 방법은 README 참고). VS Code가 통째로 꺼지면
@@ -532,7 +562,8 @@ function activate(context) {
 		vscode.commands.registerCommand('claudeCodeCompanion.findInProject', findInProject),
 		vscode.commands.registerCommand('claudeCodeCompanion.openFileInProject', openFileInProject),
 		vscode.commands.registerCommand('claudeCodeCompanion.projectActions', projectActions),
-		vscode.commands.registerCommand('claudeCodeCompanion.restoreSessions', restoreSessionsCommand)
+		vscode.commands.registerCommand('claudeCodeCompanion.restoreSessions', restoreSessionsCommand),
+		vscode.commands.registerCommand('claudeCodeCompanion.addToClaudePath', addToClaudePath)
 	);
 
 	startStopEventWatcher(context);
