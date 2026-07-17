@@ -2,7 +2,7 @@
 	"name": "vscode-claude-code-companion",
 	"displayName": "Claude Code Companion",
 	"description": "Claude Code 멀티 프로젝트 워크플로우를 위한 VS Code 도우미 확장",
-	"version": "0.11.1",
+	"version": "0.12.0",
 	"publisher": "lemondouble",
 	"license": "MIT",
 	"repository": {
@@ -47,6 +47,14 @@
 				"title": "Add to Claude Path"
 			},
 			{
+				"command": "claudeCodeCompanion.addSelectionToClaudePath",
+				"title": "Add Selection to Claude Path"
+			},
+			{
+				"command": "claudeCodeCompanion.addDiagnosticsToClaude",
+				"title": "Add Diagnostics to Claude Path"
+			},
+			{
 				"command": "claudeCodeCompanion.claudeSessions",
 				"title": "Claude Code Companion: Claude 세션 상태"
 			},
@@ -67,6 +75,17 @@
 				{
 					"command": "claudeCodeCompanion.addToClaudePath",
 					"group": "navigation@0"
+				}
+			],
+			"editor/context": [
+				{
+					"command": "claudeCodeCompanion.addSelectionToClaudePath",
+					"when": "editorHasSelection",
+					"group": "navigation@0"
+				},
+				{
+					"command": "claudeCodeCompanion.addDiagnosticsToClaude",
+					"group": "navigation@1"
 				}
 			]
 		},

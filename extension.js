@@ -702,7 +702,22 @@ async function promptRestoreOnStartup() {
 // 탐색기 우클릭 메뉴에서 선택한 파일/폴더의 절대 경로를 활성 터미널에
 // 개행 없이 타이핑한다 — Claude Code 입력창에 경로가 입력된 상태가 됨.
 // 활성 터미널로 보내므로 다른 프로젝트의 경로도 현재 채팅에 넣을 수 있다.
+// 변형: 에디터 선택 영역(경로#L10-L25), 현재 파일의 진단(에러/경고).
 // ============================================================
+
+function sendTextToActiveTerminal(text) {
+	const terminal = vscode.window.activeTerminal;
+	if (!terminal) {
+		vscode.window.showWarningMessage('활성 터미널이 없습니다. Claude가 떠 있는 터미널을 한 번 클릭한 뒤 다시 시도하세요.');
+		return;
+	}
+	terminal.sendText(`${text} `, false);
+	terminal.show(false);
+}
+
+function quoteIfNeeded(s) {
+	return /\s/.test(s) ? `"${s}"` : s;
+}
 
 function addToClaudePath(uri, uris) {
 	let targets = Array.isArray(uris) && uris.length > 0 ? uris : uri ? [uri] : [];
@@ -715,16 +730,74 @@ function addToClaudePath(uri, uris) {
 		vscode.window.showWarningMessage('경로를 보낼 파일/폴더가 없습니다.');
 		return;
 	}
-	const terminal = vscode.window.activeTerminal;
-	if (!terminal) {
-		vscode.window.showWarningMessage('활성 터미널이 없습니다. Claude가 떠 있는 터미널을 한 번 클릭한 뒤 다시 시도하세요.');
+	sendTextToActiveTerminal(targets.map((u) => quoteIfNeeded(u.fsPath)).join(' '));
+}
+
+// 선택 영역 → "경로#L10-L25" 참조 (1-indexed). 선택 끝이 어느 라인의 첫
+// 칸이면 그 라인은 실제로 선택된 게 아니므로 제외한다 (라인 드래그 선택).
+function selectionRef(fsPath, sel) {
+	const startLine = sel.start.line + 1;
+	let endLine = sel.end.line + 1;
+	if (endLine > startLine && sel.end.character === 0) {
+		endLine--;
+	}
+	const suffix = endLine > startLine ? `#L${startLine}-L${endLine}` : `#L${startLine}`;
+	return quoteIfNeeded(`${fsPath}${suffix}`);
+}
+
+function addSelectionToClaudePath() {
+	const editor = vscode.window.activeTextEditor;
+	if (!editor || editor.document.uri.scheme !== 'file') {
+		vscode.window.showWarningMessage('선택 영역을 보낼 파일 에디터가 없습니다.');
 		return;
 	}
-	const text = targets
-		.map((u) => (/\s/.test(u.fsPath) ? `"${u.fsPath}"` : u.fsPath))
-		.join(' ');
-	terminal.sendText(`${text} `, false);
-	terminal.show(false);
+	const fsPath = editor.document.uri.fsPath;
+	// 다중 커서 선택 지원. 선택이 하나도 없으면 커서 라인을 참조로.
+	let sels = editor.selections.filter((s) => !s.isEmpty);
+	if (sels.length === 0) {
+		sels = [editor.selection];
+	}
+	sendTextToActiveTerminal(sels.map((s) => selectionRef(fsPath, s)).join(' '));
+}
+
+const DIAG_SEVERITY_NAMES = ['Error', 'Warning', 'Info', 'Hint'];
+const MAX_DIAGNOSTICS = 10;
+
+// 진단 목록 → 한 줄 텍스트. 터미널에서 개행 = 프롬프트 제출이라
+// 여러 진단을 "; "로 이어붙인다. 심각한 것부터 최대 10개.
+function formatDiagnostics(fsPath, diags) {
+	const sorted = [...diags].sort(
+		(a, b) => a.severity - b.severity || a.range.start.line - b.range.start.line
+	);
+	const parts = sorted.slice(0, MAX_DIAGNOSTICS).map((d) => {
+		const sev = DIAG_SEVERITY_NAMES[d.severity] || 'Info';
+		const msg = String(d.message).replace(/\s+/g, ' ').trim();
+		const src = d.source ? ` (${d.source})` : '';
+		return `${fsPath}#L${d.range.start.line + 1} [${sev}] ${msg}${src}`;
+	});
+	let text = parts.join('; ');
+	if (sorted.length > MAX_DIAGNOSTICS) {
+		text += ` (외 ${sorted.length - MAX_DIAGNOSTICS}개)`;
+	}
+	return text;
+}
+
+function addDiagnosticsToClaude() {
+	const editor = vscode.window.activeTextEditor;
+	if (!editor || editor.document.uri.scheme !== 'file') {
+		vscode.window.showWarningMessage('진단을 보낼 파일 에디터가 없습니다.');
+		return;
+	}
+	let diags = vscode.languages.getDiagnostics(editor.document.uri);
+	// 선택 영역이 있으면 그 범위와 겹치는 진단만
+	if (!editor.selection.isEmpty) {
+		diags = diags.filter((d) => d.range.intersection(editor.selection));
+	}
+	if (diags.length === 0) {
+		vscode.window.showInformationMessage('보낼 진단이 없습니다.');
+		return;
+	}
+	sendTextToActiveTerminal(formatDiagnostics(editor.document.uri.fsPath, diags));
 }
 
 // ============================================================
@@ -980,6 +1053,8 @@ function activate(context) {
 		vscode.commands.registerCommand('claudeCodeCompanion.projectActions', projectActions),
 		vscode.commands.registerCommand('claudeCodeCompanion.restoreSessions', restoreSessionsCommand),
 		vscode.commands.registerCommand('claudeCodeCompanion.addToClaudePath', addToClaudePath),
+		vscode.commands.registerCommand('claudeCodeCompanion.addSelectionToClaudePath', addSelectionToClaudePath),
+		vscode.commands.registerCommand('claudeCodeCompanion.addDiagnosticsToClaude', addDiagnosticsToClaude),
 		vscode.commands.registerCommand('claudeCodeCompanion.claudeSessions', claudeSessionsQuickPick),
 		vscode.commands.registerCommand('claudeCodeCompanion.installHooks', () => installHooksCommand(context))
 	);
@@ -999,4 +1074,8 @@ function activate(context) {
 
 function deactivate() {}
 
-module.exports = { activate, deactivate, _test: { deriveProjectRoot, findGitRepos } };
+module.exports = {
+	activate,
+	deactivate,
+	_test: { deriveProjectRoot, findGitRepos, selectionRef, formatDiagnostics }
+};
