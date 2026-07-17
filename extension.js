@@ -342,6 +342,156 @@ function startStopEventWatcher(context) {
 }
 
 // ============================================================
+// 기능 4: Claude 세션 저장/복구
+// SessionStart/SessionEnd 훅이 ~/.claude/companion-sessions/ 에 활성
+// 세션을 기록한다 (설치 방법은 README 참고). VS Code가 통째로 꺼지면
+// SessionEnd가 실행되지 못해 파일이 남고, 그 파일이 곧 복구 대상이다.
+// 복구 = 해당 폴더에 터미널을 만들어 `claude --resume <session_id>` 실행.
+// ============================================================
+
+const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'companion-sessions');
+const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+function readSavedSessions() {
+	let names;
+	try {
+		names = fs.readdirSync(SESSIONS_DIR);
+	} catch {
+		return [];
+	}
+	const sessions = [];
+	for (const name of names) {
+		if (!name.endsWith('.json')) {
+			continue;
+		}
+		const file = path.join(SESSIONS_DIR, name);
+		try {
+			const mtime = fs.statSync(file).mtimeMs;
+			if (Date.now() - mtime > SESSION_MAX_AGE_MS) {
+				fs.unlinkSync(file); // 오래된 잔재 정리
+				continue;
+			}
+			const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+			if (data && typeof data.cwd === 'string' && typeof data.session_id === 'string') {
+				sessions.push({ file, cwd: data.cwd, sessionId: data.session_id, mtime });
+			}
+		} catch {
+			// 깨진 파일/동시 삭제는 무시
+		}
+	}
+	return sessions;
+}
+
+// argv[0]이 정확히 claude인 프로세스들의 cwd 목록 (/proc 스캔, Linux/WSL 전용)
+function runningClaudeCwds() {
+	const cwds = [];
+	let pids;
+	try {
+		pids = fs.readdirSync('/proc').filter((n) => /^\d+$/.test(n));
+	} catch {
+		return cwds; // /proc 없는 플랫폼 — 실행 중 감지 생략
+	}
+	for (const pid of pids) {
+		try {
+			const argv0 = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0')[0] || '';
+			if (path.basename(argv0) !== 'claude') {
+				continue;
+			}
+			cwds.push(fs.readlinkSync(`/proc/${pid}/cwd`));
+		} catch {
+			// 이미 종료됐거나 권한 없음
+		}
+	}
+	return cwds;
+}
+
+// 이 창에서 복구 가능한 세션 목록: 폴더당 최신 1개, 살아있는 세션 제외.
+// files에는 해당 폴더의 레지스트리 파일 전부를 담는다 (복구/무시 시 일괄 정리용).
+function collectRestorableSessions() {
+	const aliveFolders = new Set();
+	for (const cwd of runningClaudeCwds()) {
+		const f = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(cwd));
+		if (f) {
+			aliveFolders.add(f.uri.toString());
+		}
+	}
+	const byFolder = new Map();
+	for (const s of readSavedSessions()) {
+		const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(s.cwd));
+		if (!folder) {
+			continue; // 이 창의 프로젝트 아님
+		}
+		const key = folder.uri.toString();
+		if (aliveFolders.has(key)) {
+			continue; // 이미 돌고 있음 (창 리로드 직후 등) — 부활 금지
+		}
+		const entry = byFolder.get(key) || { folder, files: [], latest: s };
+		entry.files.push(s.file);
+		if (s.mtime > entry.latest.mtime) {
+			entry.latest = s;
+		}
+		byFolder.set(key, entry);
+	}
+	return [...byFolder.values()];
+}
+
+function discardSessionFiles(items) {
+	for (const item of items) {
+		for (const file of item.files) {
+			try {
+				fs.unlinkSync(file);
+			} catch {
+				// 다른 창이 먼저 지웠으면 무시
+			}
+		}
+	}
+}
+
+function launchRestoredSessions(items) {
+	const claudeCmd = config().get('sessionRestore.claudeCommand', 'claude');
+	for (const item of items) {
+		const s = item.latest;
+		const terminal = vscode.window.createTerminal({
+			name: item.folder.name,
+			cwd: vscode.Uri.file(s.cwd)
+		});
+		terminal.show(true);
+		terminal.sendText(`${claudeCmd} --resume ${s.sessionId}`);
+	}
+	discardSessionFiles(items);
+}
+
+async function restoreSessionsCommand() {
+	const items = collectRestorableSessions();
+	if (items.length === 0) {
+		vscode.window.showInformationMessage('복구할 Claude 세션이 없습니다.');
+		return;
+	}
+	launchRestoredSessions(items);
+}
+
+async function promptRestoreOnStartup() {
+	if (!config().get('sessionRestore.enabled', true)) {
+		return;
+	}
+	const items = collectRestorableSessions();
+	if (items.length === 0) {
+		return;
+	}
+	const names = items.map((i) => i.folder.name).join(', ');
+	const picked = await vscode.window.showInformationMessage(
+		`이전 Claude 세션 발견: ${names}`,
+		'복구',
+		'무시'
+	);
+	if (picked === '복구') {
+		launchRestoredSessions(items);
+	} else if (picked === '무시') {
+		discardSessionFiles(items);
+	}
+}
+
+// ============================================================
 
 function activate(context) {
 	statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -381,10 +531,12 @@ function activate(context) {
 
 		vscode.commands.registerCommand('claudeCodeCompanion.findInProject', findInProject),
 		vscode.commands.registerCommand('claudeCodeCompanion.openFileInProject', openFileInProject),
-		vscode.commands.registerCommand('claudeCodeCompanion.projectActions', projectActions)
+		vscode.commands.registerCommand('claudeCodeCompanion.projectActions', projectActions),
+		vscode.commands.registerCommand('claudeCodeCompanion.restoreSessions', restoreSessionsCommand)
 	);
 
 	startStopEventWatcher(context);
+	promptRestoreOnStartup();
 
 	// 확장 로드 시점의 활성 터미널/에디터를 한 번 반영
 	handleTerminalFocus(vscode.window.activeTerminal);

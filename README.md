@@ -61,13 +61,55 @@ VS Code에는 이 방향의 내장 기능이 없다 ([microsoft/vscode#71641](ht
 
 훅은 Stop 이벤트의 stdin JSON(cwd 포함)을 그대로 파일로 저장하며, 1시간 지난 이벤트 파일은 스스로 정리한다.
 
+### 4. Claude 세션 저장/복구
+
+VS Code를 껐다 켜면 각 프로젝트 터미널에서 돌던 Claude 세션이 다 죽는 문제를 해결한다. 터미널 스크롤백은 살릴 수 없지만, 진짜 중요한 대화 세션은 `claude --resume <session_id>`로 복구된다.
+
+동작 방식:
+
+- **SessionStart 훅**이 세션 시작 시 `~/.claude/companion-sessions/<session_id>.json`에 기록 (cwd 포함). `claude -p` 단발 실행은 훅이 부모 프로세스의 cmdline에서 감지해 기록하지 않는다.
+- **SessionEnd 훅**이 의도적 종료(`/exit`, `/clear`, logout — reason이 `prompt_input_exit`/`clear`/`logout`)일 때만 기록을 삭제한다. 창이 닫혀서 죽은 경우(SIGHUP)는 reason이 `other`라 기록이 남는다 — 실측 결과 SIGHUP에서도 SessionEnd 훅이 실행되므로 reason 구분이 필수다.
+- **확장이 시작될 때** 남은 기록 중 이 창의 워크스페이스에 속한 것을 찾아 "복구할까요?" 알림을 띄운다. 수락하면 프로젝트별 터미널을 만들어 `claude --resume <session_id>`를 실행한다.
+- 창 리로드처럼 claude 프로세스가 살아있는 경우는 `/proc` 스캔(argv[0]이 `claude`인 프로세스의 cwd)으로 걸러내 이중 부활을 막는다.
+- 커맨드 팔레트 `Claude Code Companion: Claude 세션 복구`로 수동 실행도 가능.
+- 30일 지난 기록은 자동 정리.
+
+**훅 설치** (필수, 1회): `~/.claude/settings.json`의 `hooks`에 추가:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "case \" $(tr \"\\0\" \" \" < /proc/$PPID/cmdline 2>/dev/null)\" in *\" -p \"*|*\" --print \"*) exit 0;; esac; d=\"$HOME/.claude/companion-sessions\"; mkdir -p \"$d\"; j=\"$(cat)\"; id=$(printf \"%s\" \"$j\" | sed -n \"s/.*\\\"session_id\\\"[[:space:]]*:[[:space:]]*\\\"\\([^\\\"]*\\)\\\".*/\\1/p\"); [ -n \"$id\" ] && printf \"%s\" \"$j\" > \"$d/$id.json\"; true"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "d=\"$HOME/.claude/companion-sessions\"; j=\"$(cat)\"; id=$(printf \"%s\" \"$j\" | sed -n \"s/.*\\\"session_id\\\"[[:space:]]*:[[:space:]]*\\\"\\([^\\\"]*\\)\\\".*/\\1/p\"); r=$(printf \"%s\" \"$j\" | sed -n \"s/.*\\\"reason\\\"[[:space:]]*:[[:space:]]*\\\"\\([^\\\"]*\\)\\\".*/\\1/p\"); case \"$r\" in clear|logout|prompt_input_exit) [ -n \"$id\" ] && rm -f \"$d/$id.json\";; esac; true"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 ## 설치
 
 [Releases](https://github.com/LemonDouble/vscode-claude-code-companion/releases)에서 vsix를 받거나, 직접 빌드한다:
 
 ```bash
 npx --yes @vscode/vsce package
-code --install-extension vscode-claude-code-companion-0.4.0.vsix
+code --install-extension vscode-claude-code-companion-0.5.0.vsix
 ```
 
 WSL 환경이라면 VS Code 통합 터미널(WSL)에서 실행해야 WSL 쪽에 설치된다.
@@ -80,6 +122,8 @@ UI로 설치하려면: 확장 탭 → `...` 메뉴 → "Install from VSIX...".
 | `claudeCodeCompanion.explorerSync.enabled` | `true` | 터미널 포커스 시 탐색기 이동 |
 | `claudeCodeCompanion.explorerSync.followCd` | `true` | 터미널 안에서 cd 할 때도 따라 이동 |
 | `claudeCodeCompanion.stopNotification.enabled` | `true` | Claude 응답 완료 시 알림 표시 |
+| `claudeCodeCompanion.sessionRestore.enabled` | `true` | 시작 시 끊긴 Claude 세션 복구 여부 물어보기 |
+| `claudeCodeCompanion.sessionRestore.claudeCommand` | `claude` | 복구 시 사용할 claude 실행 명령 |
 
 커맨드 팔레트에서 `Claude Code Companion: 터미널-탐색기 동기화 켜기/끄기`로 토글 가능.
 

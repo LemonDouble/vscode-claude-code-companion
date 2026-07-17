@@ -2,7 +2,7 @@
 	"name": "vscode-claude-code-companion",
 	"displayName": "Claude Code Companion",
 	"description": "Claude Code 멀티 프로젝트 워크플로우를 위한 VS Code 도우미 확장",
-	"version": "0.4.0",
+	"version": "0.5.0",
 	"publisher": "lemondouble",
 	"license": "MIT",
 	"repository": {
@@ -37,6 +37,10 @@
 			{
 				"command": "claudeCodeCompanion.projectActions",
 				"title": "Claude Code Companion: 현재 프로젝트 메뉴"
+			},
+			{
+				"command": "claudeCodeCompanion.restoreSessions",
+				"title": "Claude Code Companion: Claude 세션 복구"
 			}
 		],
 		"menus": {
@@ -65,6 +69,16 @@
 					"type": "boolean",
 					"default": true,
 					"description": "Claude Code 응답 완료 시 알림 표시 (Claude Code Stop 훅 설치 필요 — README 참고)"
+				},
+				"claudeCodeCompanion.sessionRestore.enabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "시작 시 끊긴 Claude 세션을 발견하면 복구 여부를 물어봄 (SessionStart/SessionEnd 훅 설치 필요 — README 참고)"
+				},
+				"claudeCodeCompanion.sessionRestore.claudeCommand": {
+					"type": "string",
+					"default": "claude",
+					"description": "세션 복구 시 사용할 claude 실행 명령 (--resume <session_id>가 뒤에 붙음)"
 				}
 			}
 		}
