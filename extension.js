@@ -247,11 +247,14 @@ const EVENTS_DIR = path.join(os.homedir(), '.claude', 'companion-events');
 const recentNotifications = new Map();
 const NOTIFICATION_DEDUPE_MS = 3000;
 
-// 해당 폴더의 claude가 떠 있는 터미널을 찾는다.
-// 1순위: claude 프로세스의 조상 셸 pid == terminal.processId 인 터미널
-//        (같은 폴더에 터미널이 여러 개여도 claude가 도는 터미널을 특정)
-// 2순위: cwd가 정확히 일치하는 터미널, 3순위: 같은 폴더의 아무 터미널
-async function findTerminalForFolder(folder, cwdPath) {
+// 해당 프로젝트(cwd)의 claude가 떠 있는 터미널을 찾는다.
+// 워크스페이스 루트가 컨테이너 폴더(tools, k8s 등)여도 그 안의 프로젝트들을
+// 구분할 수 있도록, 폴더가 아니라 cwd를 기준으로 매칭한다.
+// 1순위: cwd가 일치하는 claude 프로세스의 조상 셸 pid == terminal.processId
+// 2순위: 셸 cwd가 일치하는 터미널
+// 3순위: 같은 워크스페이스 폴더에서 도는 claude의 터미널
+// 4순위: 같은 워크스페이스 폴더의 아무 터미널
+async function findTerminalForProject(cwdPath, folder) {
 	const terminals = vscode.window.terminals;
 	const pidToTerminal = new Map();
 	await Promise.all(
@@ -266,11 +269,7 @@ async function findTerminalForFolder(folder, cwdPath) {
 			}
 		})
 	);
-	for (const proc of runningClaudeProcs()) {
-		const procFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(proc.cwd));
-		if (!procFolder || procFolder.uri.toString() !== folder.uri.toString()) {
-			continue;
-		}
+	const terminalOfClaude = (proc) => {
 		let p = proc.pid;
 		for (let depth = 0; depth < 5; depth++) {
 			p = ppidOf(p);
@@ -282,8 +281,28 @@ async function findTerminalForFolder(folder, cwdPath) {
 				return terminal;
 			}
 		}
+		return undefined;
+	};
+	const procs = runningClaudeProcs();
+	for (const proc of procs) {
+		if (proc.cwd === cwdPath) {
+			const terminal = terminalOfClaude(proc);
+			if (terminal) {
+				return terminal;
+			}
+		}
 	}
-	let fallback;
+	let sameFolderClaude;
+	for (const proc of procs) {
+		if (sameFolderClaude || !folder) {
+			break;
+		}
+		const f = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(proc.cwd));
+		if (f && f.uri.toString() === folder.uri.toString()) {
+			sameFolderClaude = terminalOfClaude(proc);
+		}
+	}
+	let sameFolderTerminal;
 	for (const t of terminals) {
 		const cwd = getTerminalCwd(t);
 		if (!cwd || cwd.scheme !== 'file') {
@@ -293,11 +312,11 @@ async function findTerminalForFolder(folder, cwdPath) {
 			return t;
 		}
 		const f = vscode.workspace.getWorkspaceFolder(cwd);
-		if (f && f.uri.toString() === folder.uri.toString() && !fallback) {
-			fallback = t;
+		if (folder && f && f.uri.toString() === folder.uri.toString() && !sameFolderTerminal) {
+			sameFolderTerminal = t;
 		}
 	}
-	return fallback;
+	return sameFolderClaude || sameFolderTerminal;
 }
 
 async function handleCompanionEvent(file) {
@@ -319,12 +338,15 @@ async function handleCompanionEvent(file) {
 	// 이 창의 이벤트로 확정됐으므로 파일 제거 (다른 창의 뒤늦은 처리 방지)
 	fs.unlink(file, () => {});
 
+	// 라벨/매칭은 폴더가 아니라 cwd 기준 — 워크스페이스 루트가 컨테이너
+	// 폴더여도 그 안의 프로젝트를 정확히 가리키기 위함
 	const kind = event.hook_event_name;
+	const projectName = path.basename(event.cwd);
 	let message;
 	if (kind === 'Stop' && config().get('stopNotification.enabled', true)) {
-		message = `✅ ${folder.name} — Claude 응답 완료`;
+		message = `✅ ${projectName} — Claude 응답 완료`;
 	} else if (kind === 'Notification' && config().get('permissionNotification.enabled', true)) {
-		message = `⏸️ ${folder.name} — Claude가 승인을 기다립니다`;
+		message = `⏸️ ${projectName} — Claude가 승인을 기다립니다`;
 	}
 	if (!message) {
 		return;
@@ -335,13 +357,12 @@ async function handleCompanionEvent(file) {
 		const active = vscode.window.activeTerminal;
 		if (vscode.window.state.focused && active) {
 			const activeCwd = getTerminalCwd(active);
-			const activeFolder = activeCwd && vscode.workspace.getWorkspaceFolder(activeCwd);
-			if (activeFolder && activeFolder.uri.toString() === folder.uri.toString()) {
+			if (activeCwd && activeCwd.fsPath === event.cwd) {
 				return;
 			}
 		}
 	}
-	const key = `${kind}:${folder.uri.toString()}`;
+	const key = `${kind}:${event.cwd}`;
 	const now = Date.now();
 	if (now - (recentNotifications.get(key) || 0) < NOTIFICATION_DEDUPE_MS) {
 		return;
@@ -349,7 +370,7 @@ async function handleCompanionEvent(file) {
 	recentNotifications.set(key, now);
 	const picked = await vscode.window.showInformationMessage(message, '터미널로 이동');
 	if (picked === '터미널로 이동') {
-		const terminal = await findTerminalForFolder(folder, event.cwd);
+		const terminal = await findTerminalForProject(event.cwd, folder);
 		if (terminal) {
 			terminal.show();
 		} else {
@@ -489,34 +510,29 @@ function ppidOf(pid) {
 	}
 }
 
-// 이 창에서 복구 가능한 세션 목록: 폴더당 최신 1개, 살아있는 세션 제외.
-// files에는 해당 폴더의 레지스트리 파일 전부를 담는다 (복구/무시 시 일괄 정리용).
+// 이 창에서 복구 가능한 세션 목록: 프로젝트(cwd)당 최신 1개, 살아있는 세션 제외.
+// 워크스페이스 폴더는 "이 창의 것인가" 판정에만 쓴다 — 루트가 컨테이너
+// 폴더(tools 등)여도 그 안의 프로젝트별로 각각 복구되도록 cwd로 그룹핑.
+// files에는 해당 cwd의 레지스트리 파일 전부를 담는다 (복구/무시 시 일괄 정리용).
 function collectRestorableSessions() {
-	const aliveFolders = new Set();
-	for (const { cwd } of runningClaudeProcs()) {
-		const f = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(cwd));
-		if (f) {
-			aliveFolders.add(f.uri.toString());
-		}
-	}
-	const byFolder = new Map();
+	const aliveCwds = new Set(runningClaudeProcs().map((p) => p.cwd));
+	const byCwd = new Map();
 	for (const s of readSavedSessions()) {
 		const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(s.cwd));
 		if (!folder) {
 			continue; // 이 창의 프로젝트 아님
 		}
-		const key = folder.uri.toString();
-		if (aliveFolders.has(key)) {
+		if (aliveCwds.has(s.cwd)) {
 			continue; // 이미 돌고 있음 (창 리로드 직후 등) — 부활 금지
 		}
-		const entry = byFolder.get(key) || { folder, files: [], latest: s };
+		const entry = byCwd.get(s.cwd) || { files: [], latest: s };
 		entry.files.push(s.file);
 		if (s.mtime > entry.latest.mtime) {
 			entry.latest = s;
 		}
-		byFolder.set(key, entry);
+		byCwd.set(s.cwd, entry);
 	}
-	return [...byFolder.values()];
+	return [...byCwd.values()];
 }
 
 function discardSessionFiles(items) {
@@ -536,7 +552,7 @@ function launchRestoredSessions(items) {
 	for (const item of items) {
 		const s = item.latest;
 		const terminal = vscode.window.createTerminal({
-			name: item.folder.name,
+			name: path.basename(s.cwd),
 			cwd: vscode.Uri.file(s.cwd)
 		});
 		terminal.show(true);
@@ -562,7 +578,7 @@ async function promptRestoreOnStartup() {
 	if (items.length === 0) {
 		return;
 	}
-	const names = items.map((i) => i.folder.name).join(', ');
+	const names = items.map((i) => path.basename(i.latest.cwd)).join(', ');
 	const picked = await vscode.window.showInformationMessage(
 		`이전 Claude 세션 발견: ${names}`,
 		'복구',

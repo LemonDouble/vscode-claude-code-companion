@@ -2,7 +2,7 @@
 	"name": "vscode-claude-code-companion",
 	"displayName": "Claude Code Companion",
 	"description": "Claude Code 멀티 프로젝트 워크플로우를 위한 VS Code 도우미 확장",
-	"version": "0.7.1",
+	"version": "0.7.2",
 	"publisher": "lemondouble",
 	"license": "MIT",
 	"repository": {
