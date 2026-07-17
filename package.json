@@ -2,7 +2,7 @@
 	"name": "vscode-claude-code-companion",
 	"displayName": "Claude Code Companion",
 	"description": "Claude Code 멀티 프로젝트 워크플로우를 위한 VS Code 도우미 확장",
-	"version": "0.3.0",
+	"version": "0.4.0",
 	"publisher": "lemondouble",
 	"license": "MIT",
 	"repository": {
@@ -60,6 +60,11 @@
 					"type": "boolean",
 					"default": true,
 					"description": "활성 터미널 안에서 cd로 폴더를 옮길 때도 탐색기가 따라 이동"
+				},
+				"claudeCodeCompanion.stopNotification.enabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "Claude Code 응답 완료 시 알림 표시 (Claude Code Stop 훅 설치 필요 — README 참고)"
 				}
 			}
 		}

@@ -30,13 +30,44 @@ VS Code에는 이 방향의 내장 기능이 없다 ([microsoft/vscode#71641](ht
 
 커맨드 팔레트(`Claude Code Companion: ...`)에서도 실행 가능하며, 기본 단축키는 제공하지 않는다 (원하면 키보드 단축키 설정에서 직접 할당).
 
+### 3. Claude 응답 완료 알림
+
+여러 터미널에서 Claude Code를 돌릴 때, 어느 프로젝트의 Claude가 응답을 마쳤는지 VS Code 알림으로 알려준다. 알림의 "터미널로 이동" 버튼을 누르면 해당 프로젝트의 터미널로 포커스가 이동한다.
+
+동작 방식: Claude Code의 [Stop 훅](https://code.claude.com/docs/en/hooks)이 응답 완료 시 이벤트 파일을 `~/.claude/companion-events/`에 쓰고, 확장이 이 디렉토리를 감시한다.
+
+- 해당 프로젝트가 워크스페이스에 열려 있는 창에만 알림이 뜬다
+- 지금 보고 있는 프로젝트의 터미널이면 알림을 생략한다 (이미 화면에 보이므로)
+- `stopNotification.enabled` 설정으로 끌 수 있다
+
+**훅 설치** (필수, 1회): `~/.claude/settings.json`의 `hooks`에 추가:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "d=\"$HOME/.claude/companion-events\"; mkdir -p \"$d\"; find \"$d\" -maxdepth 1 -type f -mmin +60 -delete 2>/dev/null; f=\"$d/$(date +%s%N)-$$\"; cat > \"$f.tmp\" && mv \"$f.tmp\" \"$f.json\""
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+훅은 Stop 이벤트의 stdin JSON(cwd 포함)을 그대로 파일로 저장하며, 1시간 지난 이벤트 파일은 스스로 정리한다.
+
 ## 설치
 
 [Releases](https://github.com/LemonDouble/vscode-claude-code-companion/releases)에서 vsix를 받거나, 직접 빌드한다:
 
 ```bash
 npx --yes @vscode/vsce package
-code --install-extension vscode-claude-code-companion-0.3.0.vsix
+code --install-extension vscode-claude-code-companion-0.4.0.vsix
 ```
 
 WSL 환경이라면 VS Code 통합 터미널(WSL)에서 실행해야 WSL 쪽에 설치된다.
@@ -48,6 +79,7 @@ UI로 설치하려면: 확장 탭 → `...` 메뉴 → "Install from VSIX...".
 |---|---|---|
 | `claudeCodeCompanion.explorerSync.enabled` | `true` | 터미널 포커스 시 탐색기 이동 |
 | `claudeCodeCompanion.explorerSync.followCd` | `true` | 터미널 안에서 cd 할 때도 따라 이동 |
+| `claudeCodeCompanion.stopNotification.enabled` | `true` | Claude 응답 완료 시 알림 표시 |
 
 커맨드 팔레트에서 `Claude Code Companion: 터미널-탐색기 동기화 켜기/끄기`로 토글 가능.
 

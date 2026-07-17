@@ -1,4 +1,7 @@
 const vscode = require('vscode');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 const CONFIG_NS = 'claudeCodeCompanion';
 
@@ -228,6 +231,117 @@ async function openFileInProject() {
 }
 
 // ============================================================
+// 기능 3: Claude 응답 완료 알림
+// Claude Code의 Stop 훅이 ~/.claude/companion-events/ 에 이벤트 파일을
+// 떨구면 (설치 방법은 README 참고), 그 이벤트의 cwd를 워크스페이스
+// 폴더에 매핑해서 알림을 띄운다. 알림 클릭 시 해당 터미널로 이동.
+// ============================================================
+
+const EVENTS_DIR = path.join(os.homedir(), '.claude', 'companion-events');
+
+// 알림이 떠 있는 동안 같은 폴더의 중복 알림을 막기 위한 기억값
+const pendingNotifications = new Set();
+
+function findTerminalForFolder(folder, cwdPath) {
+	let fallback;
+	for (const t of vscode.window.terminals) {
+		const cwd = getTerminalCwd(t);
+		if (!cwd || cwd.scheme !== 'file') {
+			continue;
+		}
+		if (cwd.fsPath === cwdPath) {
+			return t;
+		}
+		const f = vscode.workspace.getWorkspaceFolder(cwd);
+		if (f && f.uri.toString() === folder.uri.toString() && !fallback) {
+			fallback = t;
+		}
+	}
+	return fallback;
+}
+
+async function handleStopEvent(file) {
+	let event;
+	try {
+		event = JSON.parse(fs.readFileSync(file, 'utf8'));
+	} catch {
+		return; // 아직 쓰이는 중이거나 깨진 파일
+	}
+	if (!event || typeof event.cwd !== 'string') {
+		fs.unlink(file, () => {});
+		return;
+	}
+	const uri = vscode.Uri.file(event.cwd);
+	const folder = vscode.workspace.getWorkspaceFolder(uri);
+	if (!folder) {
+		return; // 이 창에 없는 프로젝트 — 해당 폴더가 열린 다른 창의 몫
+	}
+	// 이 창의 이벤트로 확정됐으므로 파일 제거 (다른 창의 뒤늦은 처리 방지)
+	fs.unlink(file, () => {});
+	if (!config().get('stopNotification.enabled', true)) {
+		return;
+	}
+	// 이미 그 프로젝트의 터미널을 보고 있으면 알림 생략
+	const active = vscode.window.activeTerminal;
+	if (vscode.window.state.focused && active) {
+		const activeCwd = getTerminalCwd(active);
+		const activeFolder = activeCwd && vscode.workspace.getWorkspaceFolder(activeCwd);
+		if (activeFolder && activeFolder.uri.toString() === folder.uri.toString()) {
+			return;
+		}
+	}
+	const key = folder.uri.toString();
+	if (pendingNotifications.has(key)) {
+		return;
+	}
+	pendingNotifications.add(key);
+	try {
+		const picked = await vscode.window.showInformationMessage(
+			`✅ ${folder.name} — Claude 응답 완료`,
+			'터미널로 이동'
+		);
+		if (picked === '터미널로 이동') {
+			const terminal = findTerminalForFolder(folder, event.cwd);
+			if (terminal) {
+				terminal.show();
+			} else {
+				await vscode.commands.executeCommand('revealInExplorer', uri);
+			}
+		}
+	} finally {
+		pendingNotifications.delete(key);
+	}
+}
+
+function startStopEventWatcher(context) {
+	try {
+		fs.mkdirSync(EVENTS_DIR, { recursive: true });
+		// 이전 세션에서 남은 이벤트 정리 — 다른 창이 방금 쓴 이벤트는 건드리지
+		// 않도록 30초 이상 지난 파일만 지운다
+		const now = Date.now();
+		for (const name of fs.readdirSync(EVENTS_DIR)) {
+			const p = path.join(EVENTS_DIR, name);
+			try {
+				if (now - fs.statSync(p).mtimeMs > 30_000) {
+					fs.unlinkSync(p);
+				}
+			} catch {
+				// 다른 창이 먼저 지웠으면 무시
+			}
+		}
+		const watcher = fs.watch(EVENTS_DIR, (_eventType, filename) => {
+			// 훅이 .tmp에 쓴 뒤 .json으로 rename하므로, .json 등장 = 쓰기 완료
+			if (filename && filename.endsWith('.json')) {
+				handleStopEvent(path.join(EVENTS_DIR, filename));
+			}
+		});
+		context.subscriptions.push({ dispose: () => watcher.close() });
+	} catch (e) {
+		console.warn('claude-code-companion: 이벤트 감시 시작 실패', e);
+	}
+}
+
+// ============================================================
 
 function activate(context) {
 	statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -269,6 +383,8 @@ function activate(context) {
 		vscode.commands.registerCommand('claudeCodeCompanion.openFileInProject', openFileInProject),
 		vscode.commands.registerCommand('claudeCodeCompanion.projectActions', projectActions)
 	);
+
+	startStopEventWatcher(context);
 
 	// 확장 로드 시점의 활성 터미널/에디터를 한 번 반영
 	handleTerminalFocus(vscode.window.activeTerminal);
