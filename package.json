@@ -2,7 +2,7 @@
 	"name": "vscode-claude-code-companion",
 	"displayName": "Claude Code Companion",
 	"description": "Claude Code 멀티 프로젝트 워크플로우를 위한 VS Code 도우미 확장",
-	"version": "0.7.3",
+	"version": "0.8.0",
 	"publisher": "lemondouble",
 	"license": "MIT",
 	"repository": {
@@ -89,6 +89,11 @@
 					"type": "boolean",
 					"default": false,
 					"description": "해당 프로젝트의 터미널이 활성 터미널이면 알림 생략 (터미널 패널이 닫혀 있어도 생략될 수 있어 기본 꺼짐)"
+				},
+				"claudeCodeCompanion.notifications.sound.enabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "알림 표시 시 사운드 재생 (WSL/Windows는 Windows 알림음, macOS는 afplay, Linux는 paplay)"
 				},
 				"claudeCodeCompanion.sessionRestore.enabled": {
 					"type": "boolean",

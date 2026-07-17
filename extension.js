@@ -1,4 +1,5 @@
 const vscode = require('vscode');
+const { exec } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -249,6 +250,24 @@ const EVENTS_DIR = path.join(os.homedir(), '.claude', 'companion-events');
 const recentNotifications = new Map();
 const NOTIFICATION_DEDUPE_MS = 3000;
 
+// 알림 사운드 — VS Code API에는 토스트 사운드가 없어 OS 명령으로 재생한다.
+// WSL에서는 리눅스 쪽 오디오 대신 Windows 시스템 알림음을 재생 (실측 ~1.8초 지연)
+function playNotificationSound() {
+	if (!config().get('notifications.sound.enabled', true)) {
+		return;
+	}
+	const isWSL = process.platform === 'linux' && os.release().toLowerCase().includes('microsoft');
+	let cmd;
+	if (process.platform === 'win32' || isWSL) {
+		cmd = `powershell.exe -NoProfile -Command "(New-Object Media.SoundPlayer 'C:\\Windows\\Media\\Windows Notify System Generic.wav').PlaySync()"`;
+	} else if (process.platform === 'darwin') {
+		cmd = 'afplay /System/Library/Sounds/Glass.aiff';
+	} else {
+		cmd = 'paplay /usr/share/sounds/freedesktop/stereo/message.oga';
+	}
+	exec(cmd, () => {}); // 플레이어가 없는 등 재생 실패는 조용히 무시
+}
+
 // 해당 프로젝트(cwd)의 claude가 떠 있는 터미널을 찾는다.
 // 워크스페이스 루트가 컨테이너 폴더(tools, k8s 등)여도 그 안의 프로젝트들을
 // 구분할 수 있도록, 폴더가 아니라 cwd를 기준으로 매칭한다.
@@ -370,6 +389,7 @@ async function handleCompanionEvent(file) {
 		return;
 	}
 	recentNotifications.set(key, now);
+	playNotificationSound();
 	const picked = await vscode.window.showInformationMessage(message, '터미널로 이동');
 	if (picked === '터미널로 이동') {
 		const terminal = await findTerminalForProject(event.cwd, folder);
