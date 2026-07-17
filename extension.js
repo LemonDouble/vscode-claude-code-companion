@@ -231,10 +231,12 @@ async function openFileInProject() {
 }
 
 // ============================================================
-// 기능 3: Claude 응답 완료 알림
-// Claude Code의 Stop 훅이 ~/.claude/companion-events/ 에 이벤트 파일을
-// 떨구면 (설치 방법은 README 참고), 그 이벤트의 cwd를 워크스페이스
-// 폴더에 매핑해서 알림을 띄운다. 알림 클릭 시 해당 터미널로 이동.
+// 기능 3: Claude 응답 완료 / 승인 대기 알림
+// Claude Code의 Stop 훅과 Notification 훅(permission_prompt)이
+// ~/.claude/companion-events/ 에 이벤트 파일을 떨구면 (설치 방법은
+// README 참고), 이벤트의 cwd를 워크스페이스 폴더에 매핑해서 알림을
+// 띄운다. 이벤트 종류는 페이로드의 hook_event_name으로 구분한다.
+// 알림 클릭 시 해당 터미널로 이동.
 // ============================================================
 
 const EVENTS_DIR = path.join(os.homedir(), '.claude', 'companion-events');
@@ -260,7 +262,7 @@ function findTerminalForFolder(folder, cwdPath) {
 	return fallback;
 }
 
-async function handleStopEvent(file) {
+async function handleCompanionEvent(file) {
 	let event;
 	try {
 		event = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -278,7 +280,15 @@ async function handleStopEvent(file) {
 	}
 	// 이 창의 이벤트로 확정됐으므로 파일 제거 (다른 창의 뒤늦은 처리 방지)
 	fs.unlink(file, () => {});
-	if (!config().get('stopNotification.enabled', true)) {
+
+	const kind = event.hook_event_name;
+	let message;
+	if (kind === 'Stop' && config().get('stopNotification.enabled', true)) {
+		message = `✅ ${folder.name} — Claude 응답 완료`;
+	} else if (kind === 'Notification' && config().get('permissionNotification.enabled', true)) {
+		message = `⏸️ ${folder.name} — Claude가 승인을 기다립니다`;
+	}
+	if (!message) {
 		return;
 	}
 	// 이미 그 프로젝트의 터미널을 보고 있으면 알림 생략
@@ -290,16 +300,13 @@ async function handleStopEvent(file) {
 			return;
 		}
 	}
-	const key = folder.uri.toString();
+	const key = `${kind}:${folder.uri.toString()}`;
 	if (pendingNotifications.has(key)) {
 		return;
 	}
 	pendingNotifications.add(key);
 	try {
-		const picked = await vscode.window.showInformationMessage(
-			`✅ ${folder.name} — Claude 응답 완료`,
-			'터미널로 이동'
-		);
+		const picked = await vscode.window.showInformationMessage(message, '터미널로 이동');
 		if (picked === '터미널로 이동') {
 			const terminal = findTerminalForFolder(folder, event.cwd);
 			if (terminal) {
@@ -332,7 +339,7 @@ function startStopEventWatcher(context) {
 		const watcher = fs.watch(EVENTS_DIR, (_eventType, filename) => {
 			// 훅이 .tmp에 쓴 뒤 .json으로 rename하므로, .json 등장 = 쓰기 완료
 			if (filename && filename.endsWith('.json')) {
-				handleStopEvent(path.join(EVENTS_DIR, filename));
+				handleCompanionEvent(path.join(EVENTS_DIR, filename));
 			}
 		});
 		context.subscriptions.push({ dispose: () => watcher.close() });
