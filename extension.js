@@ -697,6 +697,42 @@ async function promptRestoreOnStartup() {
 	}
 }
 
+// 사용자가 터미널을 직접 닫으면(휴지통/kill) claude는 그냥 kill돼서
+// SessionEnd가 삭제 사유(clear 등)로 실행되지 못하고 파일이 남는다 —
+// 크래시와 똑같은 흔적이라 다음 시작 때 복구 프롬프트가 뜬다.
+// 크래시와 달리 이 경우는 익스텐션이 살아서 닫힘 이벤트를 받으므로,
+// 여기서 파일을 지워 의도적으로 닫은 세션은 복구 대상에서 뺀다.
+// 닫힌 터미널이 어떤 세션이었는지는 이 시점엔 알 수 없어(프로세스가
+// 이미 죽어 /proc에 없음) 소거법으로 추정한다: 이 창 소속인데 살아있는
+// claude가 없는 세션 파일 전부. 응답 없이 닫힌 복구 프롬프트의 잔재가
+// 같이 지워질 수 있지만, 단순함의 대가로 감수한다.
+const USER_CLOSE_CLEANUP_DELAY_MS = 2000;
+
+function handleTerminalClose(terminal) {
+	if (!terminal.exitStatus || terminal.exitStatus.reason !== vscode.TerminalExitReason.User) {
+		return;
+	}
+	// SIGHUP을 받은 claude가 실제로 죽고 SessionStart 파일만 남기까지 대기.
+	// 이 안에 안 죽으면 정리를 놓치지만, 다음 시작 때 프롬프트가 한 번 더
+	// 뜨는 것뿐이라 (기존 동작과 동일) 재시도는 하지 않는다.
+	setTimeout(() => {
+		const aliveCwds = new Set(runningClaudeProcs().map((p) => p.cwd));
+		for (const s of readSavedSessions()) {
+			if (!vscode.workspace.getWorkspaceFolder(vscode.Uri.file(s.cwd))) {
+				continue; // 이 창의 프로젝트 아님
+			}
+			if (aliveCwds.has(s.cwd)) {
+				continue; // 다른 터미널/워크트리에서 아직 돌고 있음
+			}
+			try {
+				fs.unlinkSync(s.file);
+			} catch {
+				// 다른 창이 먼저 지웠으면 무시
+			}
+		}
+	}, USER_CLOSE_CLEANUP_DELAY_MS);
+}
+
 // ============================================================
 // 기능 5: Add to Claude Path
 // 탐색기 우클릭 메뉴에서 선택한 파일/폴더의 절대 경로를 활성 터미널에
@@ -1036,6 +1072,9 @@ function activate(context) {
 			}
 		}),
 
+		// 휴지통 등으로 사용자가 닫은 터미널의 세션 기록 정리 (기능 4)
+		vscode.window.onDidCloseTerminal(handleTerminalClose),
+
 		vscode.workspace.onDidChangeConfiguration((e) => {
 			if (e.affectsConfiguration(`${CONFIG_NS}.statusTracker.enabled`)) {
 				updateClaudeStatusBar();
@@ -1077,5 +1116,5 @@ function deactivate() {}
 module.exports = {
 	activate,
 	deactivate,
-	_test: { deriveProjectRoot, findGitRepos, selectionRef, formatDiagnostics }
+	_test: { deriveProjectRoot, findGitRepos, selectionRef, formatDiagnostics, handleTerminalClose }
 };
