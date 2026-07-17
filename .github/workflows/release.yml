@@ -1,0 +1,43 @@
+name: Release
+
+# v* 태그가 푸시되면 vsix를 빌드해서 GitHub Release에 첨부한다.
+# 웹 UI에서 릴리즈를 생성해도 (새 태그라면) 태그 push 이벤트가 발생하므로 동일하게 동작.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 태그와 package.json 버전 일치 확인
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::태그(v$TAG_VERSION)와 package.json($PKG_VERSION)의 버전이 다릅니다."
+            exit 1
+          fi
+
+      - name: vsix 패키징
+        run: npx --yes @vscode/vsce package
+
+      - name: 릴리즈에 vsix 첨부
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 웹 UI에서 릴리즈를 먼저 만든 경우 이미 존재하므로 업로드만 수행
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
+          fi
+          gh release upload "$GITHUB_REF_NAME" ./*.vsix --clobber

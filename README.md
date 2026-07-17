@@ -32,6 +32,8 @@ VS Code에는 이 방향의 내장 기능이 없다 ([microsoft/vscode#71641](ht
 
 ## 설치
 
+[Releases](https://github.com/LemonDouble/vscode-claude-code-companion/releases)에서 vsix를 받거나, 직접 빌드한다:
+
 ```bash
 npx --yes @vscode/vsce package
 code --install-extension vscode-claude-code-companion-0.3.0.vsix
