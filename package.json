@@ -2,7 +2,7 @@
 	"name": "vscode-claude-code-companion",
 	"displayName": "Claude Code Companion",
 	"description": "Claude Code 멀티 프로젝트 워크플로우를 위한 VS Code 도우미 확장",
-	"version": "0.7.2",
+	"version": "0.7.3",
 	"publisher": "lemondouble",
 	"license": "MIT",
 	"repository": {
@@ -83,7 +83,7 @@
 				"claudeCodeCompanion.permissionNotification.enabled": {
 					"type": "boolean",
 					"default": true,
-					"description": "Claude Code가 권한 승인을 기다릴 때 알림 표시 (Notification 훅 설치 필요 — README 참고)"
+					"description": "Claude Code가 질문/승인으로 입력을 기다릴 때 알림 표시 (Notification 훅 설치 필요 — README 참고)"
 				},
 				"claudeCodeCompanion.notifications.skipWhenViewing": {
 					"type": "boolean",

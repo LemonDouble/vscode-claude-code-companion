@@ -231,11 +231,13 @@ async function openFileInProject() {
 }
 
 // ============================================================
-// 기능 3: Claude 응답 완료 / 승인 대기 알림
+// 기능 3: Claude 응답 완료 / 입력 대기 알림
 // Claude Code의 Stop 훅과 Notification 훅(permission_prompt)이
 // ~/.claude/companion-events/ 에 이벤트 파일을 떨구면 (설치 방법은
 // README 참고), 이벤트의 cwd를 워크스페이스 폴더에 매핑해서 알림을
 // 띄운다. 이벤트 종류는 페이로드의 hook_event_name으로 구분한다.
+// permission_prompt는 권한 승인뿐 아니라 선택지 질문(AskUserQuestion)
+// 에도 발화하므로 문구는 "입력 대기"로 표현한다.
 // 알림 클릭 시 해당 터미널로 이동.
 // ============================================================
 
@@ -294,7 +296,7 @@ async function findTerminalForProject(cwdPath, folder) {
 	}
 	let sameFolderClaude;
 	for (const proc of procs) {
-		if (sameFolderClaude || !folder) {
+		if (sameFolderClaude) {
 			break;
 		}
 		const f = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(proc.cwd));
@@ -312,7 +314,7 @@ async function findTerminalForProject(cwdPath, folder) {
 			return t;
 		}
 		const f = vscode.workspace.getWorkspaceFolder(cwd);
-		if (folder && f && f.uri.toString() === folder.uri.toString() && !sameFolderTerminal) {
+		if (f && f.uri.toString() === folder.uri.toString() && !sameFolderTerminal) {
 			sameFolderTerminal = t;
 		}
 	}
@@ -346,7 +348,7 @@ async function handleCompanionEvent(file) {
 	if (kind === 'Stop' && config().get('stopNotification.enabled', true)) {
 		message = `✅ ${projectName} — Claude 응답 완료`;
 	} else if (kind === 'Notification' && config().get('permissionNotification.enabled', true)) {
-		message = `⏸️ ${projectName} — Claude가 승인을 기다립니다`;
+		message = `⏸️ ${projectName} — Claude가 입력을 기다립니다`;
 	}
 	if (!message) {
 		return;
@@ -379,22 +381,10 @@ async function handleCompanionEvent(file) {
 	}
 }
 
-function startStopEventWatcher(context) {
+function startCompanionEventWatcher(context) {
 	try {
 		fs.mkdirSync(EVENTS_DIR, { recursive: true });
-		// 이전 세션에서 남은 이벤트 정리 — 다른 창이 방금 쓴 이벤트는 건드리지
-		// 않도록 30초 이상 지난 파일만 지운다
-		const now = Date.now();
-		for (const name of fs.readdirSync(EVENTS_DIR)) {
-			const p = path.join(EVENTS_DIR, name);
-			try {
-				if (now - fs.statSync(p).mtimeMs > 30_000) {
-					fs.unlinkSync(p);
-				}
-			} catch {
-				// 다른 창이 먼저 지웠으면 무시
-			}
-		}
+		// 오래된 이벤트 파일 정리는 훅 커맨드의 find -mmin +60 -delete가 담당
 		const watcher = fs.watch(EVENTS_DIR, (_eventType, filename) => {
 			// 훅이 .tmp에 쓴 뒤 .json으로 rename하므로, .json 등장 = 쓰기 완료
 			if (filename && filename.endsWith('.json')) {
@@ -405,36 +395,6 @@ function startStopEventWatcher(context) {
 	} catch (e) {
 		console.warn('claude-code-companion: 이벤트 감시 시작 실패', e);
 	}
-}
-
-// ============================================================
-// 기능 5: Add to Claude Path
-// 탐색기 우클릭 메뉴에서 선택한 파일/폴더의 절대 경로를 활성 터미널에
-// 개행 없이 타이핑한다 — Claude Code 입력창에 경로가 입력된 상태가 됨.
-// 활성 터미널로 보내므로 다른 프로젝트의 경로도 현재 채팅에 넣을 수 있다.
-// ============================================================
-
-function addToClaudePath(uri, uris) {
-	let targets = Array.isArray(uris) && uris.length > 0 ? uris : uri ? [uri] : [];
-	// 커맨드 팔레트에서 uri 없이 호출된 경우 활성 에디터 파일로 대체
-	if (targets.length === 0 && vscode.window.activeTextEditor) {
-		targets = [vscode.window.activeTextEditor.document.uri];
-	}
-	targets = targets.filter((u) => u && u.scheme === 'file');
-	if (targets.length === 0) {
-		vscode.window.showWarningMessage('경로를 보낼 파일/폴더가 없습니다.');
-		return;
-	}
-	const terminal = vscode.window.activeTerminal;
-	if (!terminal) {
-		vscode.window.showWarningMessage('활성 터미널이 없습니다. Claude가 떠 있는 터미널을 한 번 클릭한 뒤 다시 시도하세요.');
-		return;
-	}
-	const text = targets
-		.map((u) => (/\s/.test(u.fsPath) ? `"${u.fsPath}"` : u.fsPath))
-		.join(' ');
-	terminal.sendText(`${text} `, false);
-	terminal.show(false);
 }
 
 // ============================================================
@@ -592,6 +552,36 @@ async function promptRestoreOnStartup() {
 }
 
 // ============================================================
+// 기능 5: Add to Claude Path
+// 탐색기 우클릭 메뉴에서 선택한 파일/폴더의 절대 경로를 활성 터미널에
+// 개행 없이 타이핑한다 — Claude Code 입력창에 경로가 입력된 상태가 됨.
+// 활성 터미널로 보내므로 다른 프로젝트의 경로도 현재 채팅에 넣을 수 있다.
+// ============================================================
+
+function addToClaudePath(uri, uris) {
+	let targets = Array.isArray(uris) && uris.length > 0 ? uris : uri ? [uri] : [];
+	// 커맨드 팔레트에서 uri 없이 호출된 경우 활성 에디터 파일로 대체
+	if (targets.length === 0 && vscode.window.activeTextEditor) {
+		targets = [vscode.window.activeTextEditor.document.uri];
+	}
+	targets = targets.filter((u) => u && u.scheme === 'file');
+	if (targets.length === 0) {
+		vscode.window.showWarningMessage('경로를 보낼 파일/폴더가 없습니다.');
+		return;
+	}
+	const terminal = vscode.window.activeTerminal;
+	if (!terminal) {
+		vscode.window.showWarningMessage('활성 터미널이 없습니다. Claude가 떠 있는 터미널을 한 번 클릭한 뒤 다시 시도하세요.');
+		return;
+	}
+	const text = targets
+		.map((u) => (/\s/.test(u.fsPath) ? `"${u.fsPath}"` : u.fsPath))
+		.join(' ');
+	terminal.sendText(`${text} `, false);
+	terminal.show(false);
+}
+
+// ============================================================
 
 function activate(context) {
 	statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -636,7 +626,7 @@ function activate(context) {
 		vscode.commands.registerCommand('claudeCodeCompanion.addToClaudePath', addToClaudePath)
 	);
 
-	startStopEventWatcher(context);
+	startCompanionEventWatcher(context);
 	promptRestoreOnStartup();
 
 	// 확장 로드 시점의 활성 터미널/에디터를 한 번 반영
@@ -644,7 +634,6 @@ function activate(context) {
 	if (vscode.window.activeTextEditor) {
 		setCurrentProject(vscode.window.activeTextEditor.document.uri);
 	}
-	updateStatusBar();
 }
 
 function deactivate() {}
