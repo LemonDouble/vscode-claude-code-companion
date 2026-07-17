@@ -1,0 +1,64 @@
+# Claude Code Companion
+
+Claude Code CLI로 여러 프로젝트를 동시에 진행할 때의 워크플로우를 돕는 VS Code 확장.
+
+멀티 루트 워크스페이스 한 창에서 프로젝트별 터미널을 띄워놓고 작업하는 상황을 전제로 한다. 기능은 계속 추가될 예정.
+
+## 기능
+
+### 1. 터미널-탐색기 동기화
+
+터미널 포커스를 옮기면 탐색기(Explorer)가 해당 터미널의 작업 디렉토리로 자동 이동한다.
+
+- 활성 터미널이 바뀌면 (`onDidChangeActiveTerminal`) 셸 통합 API(`Terminal.shellIntegration.cwd`)로 그 터미널의 현재 작업 디렉토리를 조회해서 탐색기에서 reveal
+- 터미널 안에서 `cd`로 이동해도 따라감 (`explorerSync.followCd` 설정으로 끌 수 있음)
+- 열려있는 에디터 탭은 건드리지 않음
+
+VS Code에는 이 방향의 내장 기능이 없다 ([microsoft/vscode#71641](https://github.com/Microsoft/vscode/issues/71641), as-designed로 닫힘).
+
+### 2. 현재 프로젝트로 한정된 검색
+
+멀티 루트 워크스페이스에서 검색이 전체 워크스페이스에 걸리는 문제를 해결한다. "현재 프로젝트"는 마지막으로 포커스한 터미널의 폴더 또는 마지막으로 연 에디터 파일의 폴더로 자동 판단한다.
+
+| 명령 | 기본 단축키 | 동작 |
+|---|---|---|
+| 현재 프로젝트에서 텍스트 검색 | `Ctrl+Alt+F` | 검색 뷰를 현재 프로젝트 폴더로 스코프(`./폴더명`)해서 연다 |
+| 현재 프로젝트에서 파일 열기 | `Ctrl+Alt+P` | 현재 프로젝트 폴더의 파일만 QuickPick으로 보여준다 (Ctrl+P의 프로젝트 한정판, `files.exclude`/`search.exclude` 존중) |
+
+## 설치
+
+```bash
+npx --yes @vscode/vsce package
+code --install-extension vscode-claude-code-companion-0.2.0.vsix
+```
+
+WSL 환경이라면 VS Code 통합 터미널(WSL)에서 실행해야 WSL 쪽에 설치된다.
+UI로 설치하려면: 확장 탭 → `...` 메뉴 → "Install from VSIX...".
+
+## 설정
+
+| 설정 | 기본값 | 설명 |
+|---|---|---|
+| `claudeCodeCompanion.explorerSync.enabled` | `true` | 터미널 포커스 시 탐색기 이동 |
+| `claudeCodeCompanion.explorerSync.followCd` | `true` | 터미널 안에서 cd 할 때도 따라 이동 |
+
+커맨드 팔레트에서 `Claude Code Companion: 터미널-탐색기 동기화 켜기/끄기`로 토글 가능.
+
+## 요구사항
+
+- VS Code 1.93 이상 (셸 통합 API)
+- 터미널 셸 통합 활성화 (bash/zsh 등에서 기본 자동 주입, `terminal.integrated.shellIntegration.enabled`)
+- 탐색기 동기화는 터미널의 cwd가 열린 워크스페이스 폴더 안에 있을 때만 동작
+
+## 함께 쓰면 좋은 워크스페이스 설정
+
+```jsonc
+{
+	"settings": {
+		// 터미널 탭 이름을 해당 터미널의 현재 폴더명으로 자동 표시
+		"terminal.integrated.tabs.title": "${cwdFolder}",
+		// 터미널 분할 시 어느 워크스페이스 폴더에서 열지 선택창 표시
+		"terminal.integrated.splitCwd": "workspaceRoot"
+	}
+}
+```

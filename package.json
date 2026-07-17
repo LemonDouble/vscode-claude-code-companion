@@ -1,0 +1,63 @@
+{
+	"name": "vscode-claude-code-companion",
+	"displayName": "Claude Code Companion",
+	"description": "Claude Code 멀티 프로젝트 워크플로우를 위한 VS Code 도우미 확장",
+	"version": "0.2.0",
+	"publisher": "lemondouble",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/LemonDouble/vscode-claude-code-companion"
+	},
+	"engines": {
+		"vscode": "^1.93.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"main": "./extension.js",
+	"contributes": {
+		"commands": [
+			{
+				"command": "claudeCodeCompanion.toggleExplorerSync",
+				"title": "Claude Code Companion: 터미널-탐색기 동기화 켜기/끄기"
+			},
+			{
+				"command": "claudeCodeCompanion.findInProject",
+				"title": "Claude Code Companion: 현재 프로젝트에서 텍스트 검색"
+			},
+			{
+				"command": "claudeCodeCompanion.openFileInProject",
+				"title": "Claude Code Companion: 현재 프로젝트에서 파일 열기"
+			}
+		],
+		"keybindings": [
+			{
+				"command": "claudeCodeCompanion.findInProject",
+				"key": "ctrl+alt+f"
+			},
+			{
+				"command": "claudeCodeCompanion.openFileInProject",
+				"key": "ctrl+alt+p"
+			}
+		],
+		"configuration": {
+			"title": "Claude Code Companion",
+			"properties": {
+				"claudeCodeCompanion.explorerSync.enabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "터미널 포커스 시 탐색기를 해당 터미널의 폴더로 이동"
+				},
+				"claudeCodeCompanion.explorerSync.followCd": {
+					"type": "boolean",
+					"default": true,
+					"description": "활성 터미널 안에서 cd로 폴더를 옮길 때도 탐색기가 따라 이동"
+				}
+			}
+		}
+	}
+}
