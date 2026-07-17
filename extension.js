@@ -3,6 +3,7 @@ const { exec } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const companionHooks = require('./hooks');
 
 const CONFIG_NS = 'claudeCodeCompanion';
 
@@ -13,26 +14,65 @@ function config() {
 // ============================================================
 // 현재 프로젝트 추적
 // 터미널 포커스/cwd 변경, 에디터 전환 중 가장 최근 이벤트를 기준으로
-// "지금 작업 중인 프로젝트(워크스페이스 폴더)"를 기억한다.
+// "지금 작업 중인 프로젝트"를 기억한다. 프로젝트 = 워크스페이스 폴더가
+// 아니라 cwd에서 유도한 프로젝트 루트(.git이 있는 가장 가까운 조상).
+// 큰 컨테이너 폴더(~/claude-projects 등)를 그대로 열고 터미널에서 각
+// 레포로 cd해 들어가는 워크플로우에서도 레포 단위로 한정되게 하기 위함.
 // ============================================================
 
-let currentProjectFolder;
+// { root: Uri(프로젝트 루트), folder: WorkspaceFolder(루트를 품은 워크스페이스 폴더) }
+let currentProject;
 
-function setCurrentProject(uri) {
-	if (!uri) {
+// uri(파일/폴더)에서 프로젝트 루트를 유도: 위로 올라가며 .git이 있는
+// 가장 가까운 조상. 워크스페이스 폴더 경계에서 멈추고, 못 찾으면 시작
+// 폴더 자체로 폴백 (컨테이너 루트 전체로 번지는 것 방지).
+function deriveProjectRoot(uri) {
+	if (!uri || uri.scheme !== 'file') {
 		return undefined;
 	}
 	const folder = vscode.workspace.getWorkspaceFolder(uri);
-	if (folder) {
-		currentProjectFolder = folder;
-		updateStatusBar();
+	if (!folder) {
+		return undefined;
 	}
-	return folder;
+	let dir = uri.fsPath;
+	try {
+		if (!fs.statSync(dir).isDirectory()) {
+			dir = path.dirname(dir);
+		}
+	} catch {
+		dir = path.dirname(dir);
+	}
+	const top = folder.uri.fsPath;
+	let cur = dir;
+	for (;;) {
+		// .git은 디렉토리(일반 레포) 또는 파일(worktree/서브모듈)일 수 있음
+		if (fs.existsSync(path.join(cur, '.git'))) {
+			return { root: vscode.Uri.file(cur), folder };
+		}
+		if (cur === top) {
+			break;
+		}
+		const parent = path.dirname(cur);
+		if (parent === cur) {
+			break;
+		}
+		cur = parent;
+	}
+	return { root: vscode.Uri.file(dir), folder };
 }
 
-async function resolveProjectFolder() {
-	if (currentProjectFolder) {
-		return currentProjectFolder;
+function setCurrentProject(uri) {
+	const proj = deriveProjectRoot(uri);
+	if (proj) {
+		currentProject = proj;
+		updateStatusBar();
+	}
+	return proj && proj.folder;
+}
+
+async function resolveProject() {
+	if (currentProject) {
+		return currentProject;
 	}
 	const folders = vscode.workspace.workspaceFolders || [];
 	if (folders.length === 0) {
@@ -40,13 +80,13 @@ async function resolveProjectFolder() {
 		return undefined;
 	}
 	if (folders.length === 1) {
-		return folders[0];
+		return { root: folders[0].uri, folder: folders[0] };
 	}
 	const picked = await vscode.window.showQuickPick(
 		folders.map((f) => ({ label: f.name, description: f.uri.fsPath, folder: f })),
 		{ placeHolder: '프로젝트 선택' }
 	);
-	return picked && picked.folder;
+	return picked && { root: picked.folder.uri, folder: picked.folder };
 }
 
 // ============================================================
@@ -59,39 +99,83 @@ function updateStatusBar() {
 	if (!statusItem) {
 		return;
 	}
-	if (currentProjectFolder) {
-		statusItem.text = `$(root-folder) ${currentProjectFolder.name}`;
-		statusItem.tooltip = '현재 프로젝트 — 클릭해서 검색/파일 열기';
+	if (currentProject) {
+		statusItem.text = `$(root-folder) ${path.basename(currentProject.root.fsPath)}`;
+		statusItem.tooltip = `현재 프로젝트: ${currentProject.root.fsPath}\n클릭해서 검색/파일 열기`;
 		statusItem.show();
 	} else {
 		statusItem.hide();
 	}
 }
 
+// 워크스페이스 루트 하위의 git 레포를 얕게 스캔 (레포를 찾으면 그 안으로는
+// 안 들어가고, 숨김 폴더/node_modules는 건너뜀)
+function findGitRepos(dirPath, depth, out) {
+	let entries;
+	try {
+		entries = fs.readdirSync(dirPath, { withFileTypes: true });
+	} catch {
+		return;
+	}
+	for (const e of entries) {
+		if (!e.isDirectory() || e.name.startsWith('.') || e.name === 'node_modules') {
+			continue;
+		}
+		const p = path.join(dirPath, e.name);
+		if (fs.existsSync(path.join(p, '.git'))) {
+			out.push(p);
+			continue;
+		}
+		if (depth > 1) {
+			findGitRepos(p, depth - 1, out);
+		}
+	}
+}
+
+const REPO_SCAN_DEPTH = 3;
+
 async function switchProject() {
 	const folders = vscode.workspace.workspaceFolders || [];
-	const picked = await vscode.window.showQuickPick(
-		folders.map((f) => ({ label: f.name, description: f.uri.fsPath, folder: f })),
-		{ placeHolder: '현재 프로젝트로 지정할 폴더 선택' }
-	);
+	const items = [];
+	for (const folder of folders) {
+		items.push({
+			label: `$(root-folder) ${folder.name}`,
+			description: '루트 전체',
+			root: folder.uri,
+			folder
+		});
+		const repos = [];
+		findGitRepos(folder.uri.fsPath, REPO_SCAN_DEPTH, repos);
+		for (const p of repos.sort()) {
+			items.push({
+				label: `$(repo) ${path.relative(folder.uri.fsPath, p)}`,
+				root: vscode.Uri.file(p),
+				folder
+			});
+		}
+	}
+	const picked = await vscode.window.showQuickPick(items, {
+		placeHolder: '현재 프로젝트로 지정할 폴더 선택 (하위 git 레포 자동 탐색)'
+	});
 	if (picked) {
-		currentProjectFolder = picked.folder;
+		currentProject = { root: picked.root, folder: picked.folder };
 		updateStatusBar();
 	}
 }
 
 async function projectActions() {
-	const folder = await resolveProjectFolder();
-	if (!folder) {
+	const proj = await resolveProject();
+	if (!proj) {
 		return;
 	}
+	const name = path.basename(proj.root.fsPath);
 	const picked = await vscode.window.showQuickPick(
 		[
-			{ label: `$(search) ${folder.name}에서 텍스트 검색`, action: findInProject },
-			{ label: `$(go-to-file) ${folder.name}에서 파일 열기`, action: openFileInProject },
+			{ label: `$(search) ${name}에서 텍스트 검색`, action: findInProject },
+			{ label: `$(go-to-file) ${name}에서 파일 열기`, action: openFileInProject },
 			{ label: '$(folder-opened) 다른 프로젝트로 전환...', action: switchProject }
 		],
-		{ placeHolder: `현재 프로젝트: ${folder.name}` }
+		{ placeHolder: `현재 프로젝트: ${proj.root.fsPath}` }
 	);
 	if (picked) {
 		await picked.action();
@@ -166,17 +250,33 @@ function handleTerminalFocus(terminal) {
 // 기능 2: 현재 프로젝트로 한정된 검색
 // ============================================================
 
-// 검색 뷰를 현재 프로젝트 폴더로 스코프해서 연다 (완전한 한정)
+// 검색 뷰를 현재 프로젝트 루트로 스코프해서 연다 (완전한 한정)
 async function findInProject() {
-	const folder = await resolveProjectFolder();
-	if (!folder) {
+	const proj = await resolveProject();
+	if (!proj) {
 		return;
 	}
 	const multiRoot = (vscode.workspace.workspaceFolders || []).length > 1;
+	// 워크스페이스 루트 기준 상대 경로 ('' = 루트 자체가 프로젝트)
+	const rel = path
+		.relative(proj.folder.uri.fsPath, proj.root.fsPath)
+		.split(path.sep)
+		.filter(Boolean)
+		.join('/');
+	// ./상대/경로 는 검색을 그 폴더로 한정하는 문법. 멀티 루트에서는
+	// ./루트폴더명 이 해당 루트 하나로 한정하므로 앞에 붙인다.
+	let filesToInclude = '';
+	if (multiRoot) {
+		filesToInclude = rel ? `./${proj.folder.name}/${rel}` : `./${proj.folder.name}`;
+	} else if (rel) {
+		filesToInclude = `./${rel}`;
+	}
 	await vscode.commands.executeCommand('workbench.action.findInFiles', {
-		// 멀티 루트에서 ./루트폴더명 은 해당 루트 하나로 검색을 한정하는 문법
-		filesToInclude: multiRoot ? `./${folder.name}` : '',
-		showIncludesExcludes: true
+		filesToInclude,
+		showIncludesExcludes: true,
+		// 없으면 검색 뷰에 떠 있던 기존 결과가 새 스코프로 재실행되지 않아
+		// 포함 칸만 바뀌고 결과는 전체 검색 그대로인 것처럼 보인다
+		triggerSearch: true
 	});
 }
 
@@ -196,24 +296,26 @@ function buildExcludeGlob(folder) {
 
 const MAX_FILES = 20000;
 
-// 현재 프로젝트 폴더의 파일만 QuickPick으로 보여준다 (Ctrl+P의 프로젝트 한정판)
+// 현재 프로젝트 루트의 파일만 QuickPick으로 보여준다 (Ctrl+P의 프로젝트 한정판)
 async function openFileInProject() {
-	const folder = await resolveProjectFolder();
-	if (!folder) {
+	const proj = await resolveProject();
+	if (!proj) {
 		return;
 	}
+	const name = path.basename(proj.root.fsPath);
+	// RelativePattern은 WorkspaceFolder뿐 아니라 임의 Uri도 base로 받는다
 	const files = await vscode.workspace.findFiles(
-		new vscode.RelativePattern(folder, '**/*'),
-		buildExcludeGlob(folder),
+		new vscode.RelativePattern(proj.root, '**/*'),
+		buildExcludeGlob(proj.folder),
 		MAX_FILES
 	);
 	if (files.length === 0) {
-		vscode.window.showInformationMessage(`${folder.name} 안에서 파일을 찾지 못했습니다.`);
+		vscode.window.showInformationMessage(`${name} 안에서 파일을 찾지 못했습니다.`);
 		return;
 	}
 	const items = files
 		.map((uri) => {
-			const rel = vscode.workspace.asRelativePath(uri, false);
+			const rel = path.relative(proj.root.fsPath, uri.fsPath).split(path.sep).join('/');
 			const slash = rel.lastIndexOf('/');
 			return {
 				label: slash >= 0 ? rel.slice(slash + 1) : rel,
@@ -223,7 +325,7 @@ async function openFileInProject() {
 		})
 		.sort((a, b) => `${a.description}/${a.label}`.localeCompare(`${b.description}/${b.label}`));
 	const picked = await vscode.window.showQuickPick(items, {
-		placeHolder: `${folder.name}에서 파일 열기${files.length >= MAX_FILES ? ` (상위 ${MAX_FILES}개만 표시)` : ''}`,
+		placeHolder: `${name}에서 파일 열기${files.length >= MAX_FILES ? ` (상위 ${MAX_FILES}개만 표시)` : ''}`,
 		matchOnDescription: true
 	});
 	if (picked) {
@@ -340,7 +442,9 @@ async function findTerminalForProject(cwdPath, folder) {
 	return sameFolderClaude || sameFolderTerminal;
 }
 
-async function handleCompanionEvent(file) {
+// stateOnly: 시작 시 쌓여 있던 이벤트 처리용 — 상태 추적만 반영하고
+// 뒤늦은 토스트/사운드는 내지 않는다.
+async function handleCompanionEvent(file, stateOnly = false) {
 	let event;
 	try {
 		event = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -362,6 +466,19 @@ async function handleCompanionEvent(file) {
 	// 라벨/매칭은 폴더가 아니라 cwd 기준 — 워크스페이스 루트가 컨테이너
 	// 폴더여도 그 안의 프로젝트를 정확히 가리키기 위함
 	const kind = event.hook_event_name;
+
+	// 상태 추적 반영 (기능 6) — 알림 설정과 독립적으로 항상 갱신
+	if (kind === 'UserPromptSubmit' || kind === 'PostToolUse') {
+		setClaudeState(event.cwd, 'working');
+	} else if (kind === 'Notification') {
+		setClaudeState(event.cwd, 'waiting');
+	} else if (kind === 'Stop') {
+		setClaudeState(event.cwd, 'done');
+	}
+	if (stateOnly) {
+		return;
+	}
+
 	const projectName = path.basename(event.cwd);
 	let message;
 	if (kind === 'Stop' && config().get('stopNotification.enabled', true)) {
@@ -404,6 +521,15 @@ async function handleCompanionEvent(file) {
 function startCompanionEventWatcher(context) {
 	try {
 		fs.mkdirSync(EVENTS_DIR, { recursive: true });
+		// 창이 닫혀/리로드돼 있는 동안 쌓인 이벤트는 상태 추적에만 반영.
+		// 파일명이 나노초 타임스탬프로 시작하므로 정렬 = 발생 순서.
+		const leftovers = fs
+			.readdirSync(EVENTS_DIR)
+			.filter((n) => n.endsWith('.json'))
+			.sort();
+		for (const name of leftovers) {
+			handleCompanionEvent(path.join(EVENTS_DIR, name), true);
+		}
 		// 오래된 이벤트 파일 정리는 훅 커맨드의 find -mmin +60 -delete가 담당
 		const watcher = fs.watch(EVENTS_DIR, (_eventType, filename) => {
 			// 훅이 .tmp에 쓴 뒤 .json으로 rename하므로, .json 등장 = 쓰기 완료
@@ -602,11 +728,208 @@ function addToClaudePath(uri, uris) {
 }
 
 // ============================================================
+// 기능 6: 프로젝트별 Claude 상태 추적
+// 기능 3의 이벤트 파일을 재사용해서 프로젝트(cwd)별 Claude 상태를
+// 상태바에 집계한다. UserPromptSubmit/PostToolUse 훅이 추가로 필요
+// (설치 방법은 README 참고).
+//   UserPromptSubmit / PostToolUse → ⏳ 작업 중
+//   Notification(permission_prompt) → ⏸️ 입력 대기
+//   Stop → ✅ 응답 완료
+// 프로세스가 사라진 항목은 /proc 스캔으로 주기적으로 걷어낸다.
+// 상태바 클릭 → 세션 목록 QuickPick → 선택 시 해당 터미널로 이동.
+// 토스트와 달리 입력을 처리하면 표시가 사라지므로, "놓친 토스트" 문제를
+// 상시 표시로 보완하는 게 목적이다.
+// ============================================================
+
+const claudeStates = new Map(); // cwd → { kind: 'working'|'waiting'|'done', at: ms }
+let claudeStatusItem;
+
+const STATE_ICONS = { waiting: '⏸️', done: '✅', working: '⏳' };
+const STATE_LABELS = { waiting: '입력 대기', done: '응답 완료', working: '작업 중' };
+// QuickPick/상태바 정렬: 내 손이 필요한 순서
+const STATE_ORDER = { waiting: 0, done: 1, working: 2 };
+const RECONCILE_INTERVAL_MS = 15000;
+
+function setClaudeState(cwd, kind) {
+	if (!config().get('statusTracker.enabled', true)) {
+		return;
+	}
+	claudeStates.set(cwd, { kind, at: Date.now() });
+	updateClaudeStatusBar();
+}
+
+// claude 프로세스가 사라진(세션 종료/터미널 닫힘) 항목 제거
+function reconcileClaudeStates() {
+	if (claudeStates.size === 0) {
+		return;
+	}
+	// /proc 없는 플랫폼(macOS 등)에서는 생존 판정 불가 — 전부 지우는 대신 유지
+	if (!fs.existsSync('/proc')) {
+		return;
+	}
+	const alive = new Set(runningClaudeProcs().map((p) => p.cwd));
+	let changed = false;
+	for (const cwd of [...claudeStates.keys()]) {
+		if (!alive.has(cwd)) {
+			claudeStates.delete(cwd);
+			changed = true;
+		}
+	}
+	if (changed) {
+		updateClaudeStatusBar();
+	}
+}
+
+function updateClaudeStatusBar() {
+	if (!claudeStatusItem) {
+		return;
+	}
+	if (claudeStates.size === 0 || !config().get('statusTracker.enabled', true)) {
+		claudeStatusItem.hide();
+		return;
+	}
+	const counts = { waiting: 0, done: 0, working: 0 };
+	for (const s of claudeStates.values()) {
+		counts[s.kind]++;
+	}
+	const parts = [];
+	for (const kind of ['waiting', 'done', 'working']) {
+		if (counts[kind] > 0) {
+			parts.push(`${STATE_ICONS[kind]} ${counts[kind]}`);
+		}
+	}
+	claudeStatusItem.text = parts.join('  ');
+	// 입력 대기가 있으면 경고색으로 눈에 띄게
+	claudeStatusItem.backgroundColor =
+		counts.waiting > 0 ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
+	claudeStatusItem.tooltip = [
+		'Claude 세션 상태 — 클릭해서 터미널로 이동',
+		...[...claudeStates.entries()].map(
+			([cwd, s]) => `${STATE_ICONS[s.kind]} ${path.basename(cwd)} — ${STATE_LABELS[s.kind]}`
+		)
+	].join('\n');
+	claudeStatusItem.show();
+}
+
+function formatElapsed(ms) {
+	const min = Math.floor(ms / 60000);
+	if (min < 1) {
+		return '방금 전';
+	}
+	if (min < 60) {
+		return `${min}분 경과`;
+	}
+	return `${Math.floor(min / 60)}시간 ${min % 60}분 경과`;
+}
+
+async function claudeSessionsQuickPick() {
+	reconcileClaudeStates();
+	if (claudeStates.size === 0) {
+		vscode.window.showInformationMessage('추적 중인 Claude 세션이 없습니다.');
+		return;
+	}
+	const items = [...claudeStates.entries()]
+		.sort((a, b) => STATE_ORDER[a[1].kind] - STATE_ORDER[b[1].kind] || a[1].at - b[1].at)
+		.map(([cwd, s]) => ({
+			label: `${STATE_ICONS[s.kind]} ${path.basename(cwd)}`,
+			description: `${STATE_LABELS[s.kind]} · ${formatElapsed(Date.now() - s.at)}`,
+			detail: cwd,
+			cwd
+		}));
+	const picked = await vscode.window.showQuickPick(items, {
+		placeHolder: 'Claude 세션 — 선택하면 해당 터미널로 이동'
+	});
+	if (!picked) {
+		return;
+	}
+	const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(picked.cwd));
+	const terminal = folder && (await findTerminalForProject(picked.cwd, folder));
+	if (terminal) {
+		terminal.show();
+	} else {
+		vscode.window.showWarningMessage('해당 프로젝트의 터미널을 찾지 못했습니다.');
+	}
+}
+
+// ============================================================
+// 기능 7: 훅 자동 설치/업데이트
+// 기능 3/4/6이 필요로 하는 Claude Code 훅(명세는 hooks.js)을
+// ~/.claude/settings.json에 설치한다. 시작 시 훅이 없거나 구버전이면
+// 설치를 제안하고, "이 버전은 묻지 않음"은 HOOKS_VERSION 단위로 기억한다
+// (명세가 바뀌어 버전이 오르면 다시 안내).
+// ============================================================
+
+const HOOKS_DISMISS_KEY = 'hooksPromptDismissedVersion';
+
+async function installHooksCommand(context) {
+	let result;
+	try {
+		result = companionHooks.installCompanionHooks();
+	} catch (e) {
+		vscode.window.showErrorMessage(
+			`Claude Code 훅 설치 실패 — ${companionHooks.SETTINGS_FILE} 확인 필요: ${e.message}`
+		);
+		return;
+	}
+	// 설치를 실행했으니, 이후 명세 변경 시 다시 안내받도록 리셋
+	await context.globalState.update(HOOKS_DISMISS_KEY, undefined);
+	if (result.added.length === 0 && result.updated.length === 0) {
+		vscode.window.showInformationMessage('Claude Code 훅이 이미 최신입니다.');
+		return;
+	}
+	const parts = [];
+	if (result.added.length > 0) {
+		parts.push(`추가 ${result.added.length}개 (${result.added.join(', ')})`);
+	}
+	if (result.updated.length > 0) {
+		parts.push(`갱신 ${result.updated.length}개 (${result.updated.join(', ')})`);
+	}
+	vscode.window.showInformationMessage(
+		`Claude Code 훅 설치 완료: ${parts.join(', ')} — 새로 시작하는 claude 세션부터 적용됩니다.${result.backup ? ' (기존 설정 백업: settings.json.bak)' : ''}`
+	);
+}
+
+async function promptInstallHooksOnStartup(context) {
+	if (!config().get('hooks.checkOnStartup', true)) {
+		return;
+	}
+	if (context.globalState.get(HOOKS_DISMISS_KEY) === companionHooks.HOOKS_VERSION) {
+		return;
+	}
+	let stale;
+	try {
+		stale = companionHooks.findStaleEvents(companionHooks.readSettings());
+	} catch {
+		return; // settings.json 파싱 불가 — 커맨드로 직접 실행하면 에러가 안내됨
+	}
+	if (stale.length === 0) {
+		return;
+	}
+	const picked = await vscode.window.showInformationMessage(
+		`Claude Code Companion 훅이 없거나 오래됐습니다: ${stale.join(', ')}`,
+		'설치/업데이트',
+		'이 버전은 묻지 않음'
+	);
+	if (picked === '설치/업데이트') {
+		await installHooksCommand(context);
+	} else if (picked === '이 버전은 묻지 않음') {
+		await context.globalState.update(HOOKS_DISMISS_KEY, companionHooks.HOOKS_VERSION);
+	}
+}
+
+// ============================================================
 
 function activate(context) {
 	statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
 	statusItem.command = 'claudeCodeCompanion.projectActions';
 	context.subscriptions.push(statusItem);
+
+	claudeStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
+	claudeStatusItem.command = 'claudeCodeCompanion.claudeSessions';
+	context.subscriptions.push(claudeStatusItem);
+
+	const reconcileTimer = setInterval(reconcileClaudeStates, RECONCILE_INTERVAL_MS);
+	context.subscriptions.push({ dispose: () => clearInterval(reconcileTimer) });
 
 	context.subscriptions.push(
 		vscode.window.onDidChangeActiveTerminal(handleTerminalFocus),
@@ -633,6 +956,19 @@ function activate(context) {
 			}
 		}),
 
+		// 창에 돌아왔을 때 죽은 세션을 바로 걷어냄 (15초 주기를 기다리지 않도록)
+		vscode.window.onDidChangeWindowState((state) => {
+			if (state.focused) {
+				reconcileClaudeStates();
+			}
+		}),
+
+		vscode.workspace.onDidChangeConfiguration((e) => {
+			if (e.affectsConfiguration(`${CONFIG_NS}.statusTracker.enabled`)) {
+				updateClaudeStatusBar();
+			}
+		}),
+
 		vscode.commands.registerCommand('claudeCodeCompanion.toggleExplorerSync', async () => {
 			const current = config().get('explorerSync.enabled', true);
 			await config().update('explorerSync.enabled', !current, vscode.ConfigurationTarget.Global);
@@ -643,11 +979,16 @@ function activate(context) {
 		vscode.commands.registerCommand('claudeCodeCompanion.openFileInProject', openFileInProject),
 		vscode.commands.registerCommand('claudeCodeCompanion.projectActions', projectActions),
 		vscode.commands.registerCommand('claudeCodeCompanion.restoreSessions', restoreSessionsCommand),
-		vscode.commands.registerCommand('claudeCodeCompanion.addToClaudePath', addToClaudePath)
+		vscode.commands.registerCommand('claudeCodeCompanion.addToClaudePath', addToClaudePath),
+		vscode.commands.registerCommand('claudeCodeCompanion.claudeSessions', claudeSessionsQuickPick),
+		vscode.commands.registerCommand('claudeCodeCompanion.installHooks', () => installHooksCommand(context))
 	);
 
 	startCompanionEventWatcher(context);
+	// 시작 스캔으로 복원된 상태 중 이미 죽은 세션을 즉시 걷어냄
+	reconcileClaudeStates();
 	promptRestoreOnStartup();
+	promptInstallHooksOnStartup(context);
 
 	// 확장 로드 시점의 활성 터미널/에디터를 한 번 반영
 	handleTerminalFocus(vscode.window.activeTerminal);
@@ -658,4 +999,4 @@ function activate(context) {
 
 function deactivate() {}
 
-module.exports = { activate, deactivate };
+module.exports = { activate, deactivate, _test: { deriveProjectRoot, findGitRepos } };

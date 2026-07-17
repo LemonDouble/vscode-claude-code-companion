@@ -2,7 +2,7 @@
 	"name": "vscode-claude-code-companion",
 	"displayName": "Claude Code Companion",
 	"description": "Claude Code 멀티 프로젝트 워크플로우를 위한 VS Code 도우미 확장",
-	"version": "0.8.0",
+	"version": "0.11.1",
 	"publisher": "lemondouble",
 	"license": "MIT",
 	"repository": {
@@ -45,6 +45,14 @@
 			{
 				"command": "claudeCodeCompanion.addToClaudePath",
 				"title": "Add to Claude Path"
+			},
+			{
+				"command": "claudeCodeCompanion.claudeSessions",
+				"title": "Claude Code Companion: Claude 세션 상태"
+			},
+			{
+				"command": "claudeCodeCompanion.installHooks",
+				"title": "Claude Code Companion: Claude Code 훅 설치/업데이트"
 			}
 		],
 		"menus": {
@@ -94,6 +102,16 @@
 					"type": "boolean",
 					"default": true,
 					"description": "알림 표시 시 사운드 재생 (WSL/Windows는 Windows 알림음, macOS는 afplay, Linux는 paplay)"
+				},
+				"claudeCodeCompanion.hooks.checkOnStartup": {
+					"type": "boolean",
+					"default": true,
+					"description": "시작 시 필요한 Claude Code 훅이 설치돼 있고 최신인지 확인하고, 아니면 설치를 제안"
+				},
+				"claudeCodeCompanion.statusTracker.enabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "프로젝트별 Claude 상태(작업 중/입력 대기/응답 완료)를 상태바에 표시 (UserPromptSubmit/PostToolUse 훅 설치 필요 — README 참고)"
 				},
 				"claudeCodeCompanion.sessionRestore.enabled": {
 					"type": "boolean",
